@@ -19,12 +19,6 @@ import requests
 from vigil.chart import PatientChart
 from vigil.config import settings
 from vigil.escalation.ladder import CheckinResult
-from vigil.escalation.openai_realtime import (
-    evaluate_checkin,
-    get_context,
-    place_bridged_call,
-    realtime_call_configured,
-)
 from vigil.escalation.twilio_call import twilio_call_configured
 from vigil.events import BusEvent, EscalationAction, TriageDecision
 
@@ -277,33 +271,6 @@ class NurseCallHandler:
             _release_call(to, self.issue_id)
         return action
 
-    def _realtime_call(self, decision: TriageDecision) -> EscalationAction:
-        """A REAL back-and-forth phone conversation via OpenAI Realtime (bridged over
-        Twilio). Returns a 'failed' action (never raises) so the ladder can fall back."""
-        self._emit("dialing", to=settings.nurse_phone_number, provider="openai-realtime")
-        try:
-            _cid, sid, _status = place_bridged_call(
-                "nurse", settings.nurse_phone_number, self._dynamic_vars(decision)
-            )
-            self._emit("ringing", conversation_id=sid, provider="openai-realtime")
-            return EscalationAction(
-                kind="nurse_call",
-                target=settings.nurse_phone_number,
-                message=decision.spoken_summary,
-                status="dialing",
-                provider_ref=sid,
-            )
-        except Exception as e:  # noqa: BLE001
-            log.error("openai-realtime nurse call failed: %r", e)
-            self._emit("failed", error=str(e))
-            return EscalationAction(
-                kind="nurse_call",
-                target=settings.nurse_phone_number,
-                message=decision.spoken_summary,
-                status="failed",
-                provider_ref=str(e),
-            )
-
     def _elevenlabs_call(self, decision: TriageDecision) -> EscalationAction:
         self._emit("dialing", to=settings.nurse_phone_number, provider="elevenlabs")
         try:
@@ -334,13 +301,8 @@ class NurseCallHandler:
             )
 
     def _do_call_nurse(self, decision: TriageDecision) -> EscalationAction:
-        # Transport ladder, best voice first: a REAL OpenAI-Realtime conversation ->
-        # the ElevenLabs agent -> a one-shot Twilio TTS call (works on a trial account).
-        # Each transport falls through to the next only if it fails to dial.
-        if realtime_call_configured():
-            action = self._realtime_call(decision)
-            if action.status != "failed":
-                return action
+        # Transport ladder: the ElevenLabs agent when configured, else a one-shot Twilio
+        # TTS call (works on a trial account). Falls through only if a transport fails.
         if nurse_call_configured():
             action = self._elevenlabs_call(decision)
             if action.status != "failed":
@@ -348,7 +310,7 @@ class NurseCallHandler:
         if twilio_call_configured():
             return self._twilio_call(decision)
 
-        log.error("no telephony configured — set OPENAI_API_KEY+TWILIO_*, ELEVENLABS_*, or TWILIO_*")
+        log.error("no telephony configured — set ELEVENLABS_* or TWILIO_* + NURSE_PHONE_NUMBER")
         self._emit("failed", error="No telephony configured")
         return EscalationAction(
             kind="nurse_call",
@@ -358,35 +320,9 @@ class NurseCallHandler:
             provider_ref="not-configured",
         )
 
-    def _realtime_checkin(self) -> CheckinResult:
-        """Real OpenAI-Realtime check-in call to the patient; wait for the conversation
-        to end, then derive the outcome from what they actually said."""
-        to = settings.patient_kiosk_number
-        if not to:
-            log.info("no PATIENT_KIOSK_NUMBER for realtime check-in — escalating")
-            return CheckinResult(False, False, "no patient number configured — escalating")
-        self._emit("patient_checkin", to=to, provider="openai-realtime")
-        try:
-            cid, _sid, _status = place_bridged_call("patient", to, {"patient_name": self.chart.name})
-        except Exception as e:  # noqa: BLE001
-            log.error("realtime check-in dial failed: %r", e)
-            return CheckinResult(False, False, f"check-in failed ({e}) — escalating")
-        ctx = get_context(cid)
-        if ctx is None:
-            return CheckinResult(False, False, "check-in context lost — escalating")
-        ctx.done.wait(timeout=90.0)  # bounded so the ladder never blocks forever
-        answered, reassuring, transcript = evaluate_checkin(ctx)
-        return CheckinResult(answered, reassuring, transcript)
-
     def check_in_patient(self, decision: TriageDecision) -> CheckinResult:
         """Place a real voice check-in with the patient. If not configured, escalate
         (fail-safe) rather than fabricate a response."""
-        # Preferred: a real OpenAI-Realtime conversation with the patient. Place the
-        # bridged call, wait for it to end, then derive answered/reassuring from what
-        # the patient actually said (same contract as the ElevenLabs path).
-        if realtime_call_configured():
-            return self._realtime_checkin()
-
         if not checkin_configured():
             log.info("patient check-in not configured — escalating to nurse")
             return CheckinResult(

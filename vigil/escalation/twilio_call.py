@@ -34,8 +34,14 @@ def twilio_call_configured() -> bool:
 
 
 def place_call(to_number: str, spoken_text: str) -> tuple[str, str]:
-    """Place a real outbound call that speaks `spoken_text`. Returns (call_sid, status)."""
-    twiml = f"<Response><Say>{escape(spoken_text)}</Say></Response>"
+    """Place a real outbound call that speaks `spoken_text`. Returns (call_sid, status).
+
+    Uses a natural Amazon Polly neural voice (VIGIL_TWILIO_TTS_VOICE) instead of
+    Twilio's robotic default — this is the fallback path when the OpenAI Realtime
+    voice bridge isn't up (no public tunnel)."""
+    voice = settings.twilio_tts_voice
+    voice_attr = f' voice="{escape(voice, {chr(34): "&quot;"})}"' if voice else ""
+    twiml = f"<Response><Say{voice_attr}>{escape(spoken_text)}</Say></Response>"
     url = "https://twimlets.com/echo?Twiml=" + quote(twiml, safe="")
     # Prefer a scoped API Key (SK...) + Secret for auth; fall back to the Account
     # Auth Token. Either way the REST path is scoped by the Account SID (AC...).
