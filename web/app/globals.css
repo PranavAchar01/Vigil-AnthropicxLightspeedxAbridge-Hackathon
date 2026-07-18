@@ -1569,3 +1569,39 @@ textarea {
   letter-spacing: 0.02em;
   color: var(--amber);
 }
+
+/* ================================================================= */
+/* FLAT / SHARP THEME — no gradients, no rounded corners.            */
+/* One override block; delete it to restore the original look.       */
+/* ================================================================= */
+
+/* 1 — no curves anywhere */
+* { border-radius: 0 !important; }
+
+/* 2 — solid backgrounds instead of gradients */
+body { background: var(--bg) !important; }
+.surface { background: var(--surface) !important; }
+.inset-surface { background: rgba(255, 255, 255, 0.03) !important; }
+.brand-mark { background: rgba(108, 140, 255, 0.12) !important; }
+.video-frame { background: #08080b !important; }
+.trace-rail { background: rgba(108, 140, 255, 0.22) !important; }
+.decision-card { background: rgba(108, 140, 255, 0.06) !important; }
+.decision-card.escalating { background: rgba(255, 105, 97, 0.08) !important; }
+.response-state.alert { background: rgba(255, 105, 97, 0.08) !important; }
+.empty-line { background: rgba(108, 140, 255, 0.3) !important; }
+
+/* 3 — remove decorative gradient / glow layers */
+.app-shell::before,
+.surface::after,
+.video-frame::after,
+.ambient { display: none !important; }
+
+/* 4 — voice intake: flat button + flat ESI box (severity as outline/text, no fill) */
+.mic-btn { background: rgba(255, 255, 255, 0.03) !important; border-color: var(--border) !important; color: var(--text) !important; }
+.mic-btn.recording { background: var(--danger-dim) !important; border-color: rgba(255, 114, 114, 0.5) !important; color: var(--danger) !important; }
+.intake-esi strong { background: transparent !important; border: 1px solid currentColor !important; }
+.intake-esi.esi-1 strong { color: var(--danger) !important; }
+.intake-esi.esi-2 strong { color: #f0955a !important; }
+.intake-esi.esi-3 strong { color: var(--amber) !important; }
+.intake-esi.esi-4 strong { color: #63c98b !important; }
+.intake-esi.esi-5 strong { color: var(--accent-bright) !important; }
