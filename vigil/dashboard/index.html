@@ -301,9 +301,10 @@ function handle(ev){
   else if(type==="reasoning_delta"){ if(!deltaLine) deltaLine=line("","reason"); deltaLine.textContent+=p.text; trace.scrollTop=trace.scrollHeight; }
   else if(type==="decision"){
     const changed=p.new_esi<p.prior_esi;
+    const basis=p.esi_criteria?`<div class="sys" style="margin-top:6px;font-size:12px;opacity:.85">ESI rule ${p.esi_decision_point||"?"} · ${p.esi_criteria}</div>`:``;
     line(`<div class="decision glass-sub ${p.escalate?"esc":""}"><span class="esi">ESI ${p.prior_esi} <span class="arrow">→</span> <b>${p.new_esi}</b></span>`+
       `&nbsp;&nbsp;<span class="sys">${p.action.replace(/_/g," ")}</span>`+(p.escalate?`<span class="tag">ESCALATING</span>`:``)+
-      `<div class="spoken">“${p.spoken_summary}”</div></div>`);
+      basis+`<div class="spoken">“${p.spoken_summary}”</div></div>`);
     if(changed||p.escalate) setBanner(`ESI ${p.new_esi} · ${p.action.replace(/_/g," ").toUpperCase()}`,true);
   }
   else if(type==="call_status"){

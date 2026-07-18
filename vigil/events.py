@@ -72,19 +72,55 @@ class FusedEvent(BaseModel):
 
 
 class TriageDecision(BaseModel):
-    """Claude's structured, chart-grounded re-triage decision. Monotonic."""
+    """Claude's structured, chart-grounded re-triage decision. Monotonic.
+
+    Grounded in the Emergency Severity Index (ESI) 4-decision-point algorithm
+    (ESI Implementation Handbook, AHRQ / Emergency Nurses Association). Every
+    grade reports WHICH decision point (A/B/C/D) and WHICH specific criterion
+    drove it, so the call is auditable against the published rubric.
+    """
 
     patient_id: str
     prior_esi: int = Field(ge=1, le=5)
     new_esi: int = Field(ge=1, le=5)
     escalate: bool
     action: Action
+    # ESI v4 decision point that drove the grade: A=life-saving intervention,
+    # B=high-risk/altered-mental-status/severe-distress, C=resource need, D=danger-zone vitals.
+    esi_decision_point: str = ""
+    esi_criteria: str = ""  # the one specific criterion matched, e.g. "charted HR 118 > 100"
     rationale: str  # cites the chart; shown in the reasoning trace
     spoken_summary: str  # <=10s of speech; what ElevenLabs says to the nurse
 
     def is_monotonic(self) -> bool:
         """ESI 1 is most acute, 5 least. Escalation must never raise the number."""
         return self.new_esi <= self.prior_esi
+
+
+class InitialTriageDecision(BaseModel):
+    """First-contact ESI grade computed from a spoken intake (+ optional chart).
+
+    Unlike TriageDecision (re-triage, monotonic, only-escalates), this is the
+    INITIAL acuity assignment: it runs the FULL ESI v4 algorithm including
+    Decision C (resource prediction). It is decision-SUPPORT — a clinician
+    confirms it (`needs_confirmation`). On model failure it fails SAFE to ESI 2
+    (never silently assigns a low acuity to an ungraded patient).
+    """
+
+    patient_id: str = ""
+    chief_complaint: str = ""
+    esi: int = Field(ge=1, le=5)
+    # ESI v4 decision point that assigned the level: A/B/C/D (see prompts.py).
+    esi_decision_point: str = ""
+    esi_criteria: str = ""
+    predicted_resources: list[str] = Field(default_factory=list)  # Decision C
+    danger_zone_vitals: bool = False  # Decision D
+    red_flags: list[str] = Field(default_factory=list)
+    rationale: str = ""
+    spoken_summary: str = ""
+    confidence: float = Field(default=0.0, ge=0.0, le=1.0)
+    needs_confirmation: bool = True  # human-in-the-loop on the risky first grade
+    transcript: str = ""  # the intake speech that was graded
 
 
 class EscalationAction(BaseModel):

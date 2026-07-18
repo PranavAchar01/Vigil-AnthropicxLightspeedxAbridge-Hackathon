@@ -12,6 +12,7 @@ dependencies = [
     "numpy>=1.26",
     "sounddevice>=0.4.7",
     "fastapi>=0.115",
+    "python-multipart>=0.0.9",  # multipart form parsing for the /intake audio upload
     "uvicorn[standard]>=0.30",
     "websockets>=13",
     "pydantic>=2.7",

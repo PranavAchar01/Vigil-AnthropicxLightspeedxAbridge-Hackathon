@@ -1389,3 +1389,219 @@ textarea {
     animation-iteration-count: 1 !important;
   }
 }
+
+/* ---------------------------------------------------------------- */
+/* Voice intake -> initial ESI (section 01)                          */
+/* ---------------------------------------------------------------- */
+.intake-card {
+  margin-top: 12px;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+.intake-head {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 10px;
+}
+.intake-head h3 {
+  margin: 3px 0 0;
+  font-size: 15px;
+  font-weight: 600;
+  letter-spacing: -0.01em;
+}
+.intake-select {
+  max-width: 58%;
+  padding: 7px 9px;
+  font-family: var(--font);
+  font-size: 11.5px;
+  color: var(--text-soft);
+  background: rgba(255, 255, 255, 0.03);
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  outline: none;
+  cursor: pointer;
+}
+.intake-select:focus {
+  border-color: var(--accent);
+}
+.intake-controls {
+  display: flex;
+  gap: 9px;
+  align-items: stretch;
+  flex-wrap: wrap;
+}
+.mic-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 9px;
+  padding: 10px 15px;
+  font-family: var(--font);
+  font-size: 13px;
+  font-weight: 560;
+  color: var(--text);
+  background: var(--accent-dim);
+  border: 1px solid rgba(108, 140, 255, 0.4);
+  border-radius: 12px;
+  cursor: pointer;
+  transition: background 0.15s, border-color 0.2s, box-shadow 0.2s;
+}
+.mic-btn:hover:not(:disabled) {
+  background: rgba(108, 140, 255, 0.26);
+}
+.mic-btn:disabled {
+  opacity: 0.55;
+  cursor: default;
+}
+.mic-glyph {
+  width: 11px;
+  height: 11px;
+  border-radius: 50%;
+  background: var(--accent-bright);
+  box-shadow: 0 0 0 3px rgba(108, 140, 255, 0.22);
+}
+.mic-btn.recording {
+  background: var(--danger-dim);
+  border-color: rgba(255, 114, 114, 0.5);
+  color: var(--danger);
+}
+.mic-btn.recording .mic-glyph {
+  background: var(--danger);
+  box-shadow: 0 0 0 0 rgba(255, 114, 114, 0.55);
+  animation: intake-pulse 1.4s infinite;
+}
+@keyframes intake-pulse {
+  0% { box-shadow: 0 0 0 0 rgba(255, 114, 114, 0.5); }
+  70% { box-shadow: 0 0 0 12px rgba(255, 114, 114, 0); }
+  100% { box-shadow: 0 0 0 0 rgba(255, 114, 114, 0); }
+}
+.intake-text {
+  display: flex;
+  flex: 1;
+  min-width: 180px;
+  gap: 7px;
+}
+.intake-text input {
+  flex: 1;
+  min-width: 0;
+  padding: 9px 11px;
+  font-family: var(--font);
+  font-size: 12.5px;
+  color: var(--text);
+  background: rgba(0, 0, 0, 0.32);
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  outline: none;
+}
+.intake-text input:focus {
+  border-color: var(--accent);
+}
+.intake-text button {
+  padding: 0 13px;
+  font-family: var(--font);
+  font-size: 12.5px;
+  font-weight: 560;
+  color: var(--accent-bright);
+  background: rgba(255, 255, 255, 0.03);
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  cursor: pointer;
+}
+.intake-text button:hover:not(:disabled) {
+  border-color: var(--accent);
+}
+.intake-error {
+  margin: 0;
+  color: var(--danger);
+  font-size: 12px;
+}
+.intake-result {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  padding-top: 12px;
+  border-top: 1px solid var(--border);
+}
+.intake-esi {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+}
+.intake-esi strong {
+  width: 46px;
+  height: 46px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 26px;
+  font-weight: 800;
+  border-radius: 12px;
+  color: #06070b;
+  background: var(--accent-bright);
+}
+.intake-esi.esi-1 strong { background: var(--danger); }
+.intake-esi.esi-2 strong { background: #f0955a; }
+.intake-esi.esi-3 strong { background: var(--amber); }
+.intake-esi.esi-4 strong { background: #63c98b; }
+.intake-esi.esi-5 strong { background: var(--accent-bright); }
+.intake-esi small {
+  display: block;
+  margin-top: 2px;
+  font-size: 12px;
+  color: var(--text-soft);
+}
+.intake-criteria {
+  margin: 0;
+  font-size: 12.5px;
+  line-height: 1.5;
+  color: var(--text-soft);
+}
+.intake-heard {
+  margin: 0;
+  font-size: 12px;
+  font-style: italic;
+  color: var(--text-faint);
+}
+.intake-confirm {
+  margin: 0;
+  font-size: 10.5px;
+  letter-spacing: 0.02em;
+  color: var(--amber);
+}
+
+/* ================================================================= */
+/* FLAT / SHARP THEME — no gradients, no rounded corners.            */
+/* One override block; delete it to restore the original look.       */
+/* ================================================================= */
+
+/* 1 — no curves anywhere */
+* { border-radius: 0 !important; }
+
+/* 2 — solid backgrounds instead of gradients */
+body { background: var(--bg) !important; }
+.surface { background: var(--surface) !important; }
+.inset-surface { background: rgba(255, 255, 255, 0.03) !important; }
+.brand-mark { background: rgba(108, 140, 255, 0.12) !important; }
+.video-frame { background: #08080b !important; }
+.trace-rail { background: rgba(108, 140, 255, 0.22) !important; }
+.decision-card { background: rgba(108, 140, 255, 0.06) !important; }
+.decision-card.escalating { background: rgba(255, 105, 97, 0.08) !important; }
+.response-state.alert { background: rgba(255, 105, 97, 0.08) !important; }
+.empty-line { background: rgba(108, 140, 255, 0.3) !important; }
+
+/* 3 — remove decorative gradient / glow layers */
+.app-shell::before,
+.surface::after,
+.video-frame::after,
+.ambient { display: none !important; }
+
+/* 4 — voice intake: flat button + flat ESI box (severity as outline/text, no fill) */
+.mic-btn { background: rgba(255, 255, 255, 0.03) !important; border-color: var(--border) !important; color: var(--text) !important; }
+.mic-btn.recording { background: var(--danger-dim) !important; border-color: rgba(255, 114, 114, 0.5) !important; color: var(--danger) !important; }
+.intake-esi strong { background: transparent !important; border: 1px solid currentColor !important; }
+.intake-esi.esi-1 strong { color: var(--danger) !important; }
+.intake-esi.esi-2 strong { color: #f0955a !important; }
+.intake-esi.esi-3 strong { color: var(--amber) !important; }
+.intake-esi.esi-4 strong { color: #63c98b !important; }
+.intake-esi.esi-5 strong { color: var(--accent-bright) !important; }

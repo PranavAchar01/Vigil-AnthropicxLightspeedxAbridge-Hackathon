@@ -73,6 +73,8 @@ def _finalize(raw: dict, chart: PatientChart) -> TriageDecision:
         new_esi=new_esi,
         escalate=escalate,
         action=Action(action),
+        esi_decision_point=str(raw.get("esi_decision_point", "")),
+        esi_criteria=str(raw.get("esi_criteria", "")),
         rationale=str(raw["rationale"]),
         spoken_summary=str(raw["spoken_summary"]),
     )
@@ -84,6 +86,8 @@ def _fail_safe(chart: PatientChart) -> TriageDecision:
         {
             "new_esi": min(2, chart.baseline_esi),
             "action": "page_immediately",
+            "esi_decision_point": "A",
+            "esi_criteria": "Fail-safe: re-triage model unavailable — paging a clinician.",
             "rationale": "Re-triage model unavailable; failing safe by paging a clinician.",
             "spoken_summary": "Monitoring system error. Please check on this patient now.",
         },

@@ -21,7 +21,17 @@ import time
 from contextlib import asynccontextmanager
 from pathlib import Path
 
-from fastapi import FastAPI, Header, HTTPException, Request, WebSocket, WebSocketDisconnect
+from fastapi import (
+    FastAPI,
+    File,
+    Form,
+    Header,
+    HTTPException,
+    Request,
+    UploadFile,
+    WebSocket,
+    WebSocketDisconnect,
+)
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, StreamingResponse
 
@@ -37,7 +47,7 @@ from vigil.escalation.ladder import run_ladder
 from vigil.escalation.twilio_call import twilio_call_configured
 from vigil.events import BusEvent, FusedEvent, PerceptionEvent
 from vigil.perception.fusion import EventFuser
-from vigil.reasoning import triage
+from vigil.reasoning import initial_triage, triage, voice_intake
 from vigil.reasoning.triage import ReasoningNotConfigured
 from vigil.server import status as pstatus
 from vigil.server import supabase_sink as supa
@@ -127,6 +137,8 @@ def _capabilities() -> dict[str, bool]:
         "cohort_loaded": bool(state.charts),
         "backend": supa.configured(),
         "fall_model": settings.fall_model_path.exists(),
+        "intake_triage": bool(settings.anthropic_api_key),
+        "voice_intake": bool(settings.elevenlabs_api_key),
     }
 
 
@@ -156,6 +168,12 @@ def _mirror(event: BusEvent) -> None:
         source = "vigil"
     elif t == "note":
         summary = "ambient SOAP note + FHIR bundle written"
+        source = "claude"
+    elif t == "initial_triage":
+        summary = (
+            f"voice intake → ESI {p.get('esi')} · decision {p.get('esi_decision_point')} · "
+            f"{p.get('chief_complaint')}"
+        )
         source = "claude"
     else:
         return  # skip noise: reasoning_delta, status/capabilities, patient
@@ -399,6 +417,15 @@ async def fonts():
     return JSONResponse({"error": "fonts.css missing"}, status_code=404)
 
 
+@app.get("/intake", response_class=HTMLResponse)
+async def intake_page():
+    """Browser voice-intake tool: record a spoken intake -> POST /intake -> show the ESI."""
+    page = DASHBOARD_DIR / "intake.html"
+    if page.exists():
+        return HTMLResponse(page.read_text(encoding="utf-8"))
+    return HTMLResponse("<h1>Vigil</h1><p>dashboard/intake.html missing</p>")
+
+
 @app.get("/health")
 async def health():
     return JSONResponse({"capabilities": _capabilities(), "active_patient": state.active_id})
@@ -558,3 +585,43 @@ async def set_active(patient_id: str):
     chart = _active()
     bus.publish(BusEvent(type="patient", payload=_patient_payload(chart)))
     return {"active": patient_id, "name": chart.name}
+
+
+@app.post("/intake")
+async def intake(
+    patient_id: str = Form(default=""),
+    text: str = Form(default=""),
+    audio: UploadFile | None = File(default=None),
+):
+    """Initial ESI triage from a spoken (or typed) patient intake — voice in, ESI out.
+
+    Transcribes the audio (ElevenLabs Scribe), runs the full ESI v4 decision tree
+    (initial_triage.grade), and — when the intake is bound to a known chart — sets that
+    patient's baseline_esi so the continuous re-triage loop escalates from this grade.
+    """
+    transcript = (text or "").strip()
+    if audio is not None:
+        data = await audio.read()
+        try:
+            transcript = await asyncio.to_thread(
+                voice_intake.transcribe,
+                data,
+                filename=audio.filename or "intake.webm",
+                content_type=audio.content_type or "application/octet-stream",
+            )
+        except Exception as e:  # noqa: BLE001 — surface a real STT failure honestly
+            raise HTTPException(status_code=502, detail=f"speech-to-text failed: {e}") from e
+    if not transcript:
+        raise HTTPException(status_code=400, detail="provide `text` or an `audio` file")
+
+    chart = state.charts.get(patient_id) if patient_id else None
+    try:
+        decision = await asyncio.to_thread(initial_triage.grade, transcript, chart)
+    except initial_triage.ReasoningNotConfigured as e:
+        raise HTTPException(status_code=503, detail=str(e)) from e
+
+    if chart is not None:
+        chart.baseline_esi = decision.esi  # the re-triage loop now monitors from here
+        bus.publish(BusEvent(type="patient", payload=_patient_payload(chart)))
+    bus.publish(BusEvent(type="initial_triage", payload=decision.model_dump()))
+    return JSONResponse(decision.model_dump())
