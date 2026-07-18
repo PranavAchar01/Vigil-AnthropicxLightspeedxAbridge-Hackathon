@@ -34,3 +34,12 @@ data/incidents/
 # Large extracted Abridge cohorts stay local. The small repository cohort is
 # hand-authored synthetic demo data and is intentionally committed.
 data/extracted_demo_cohort.json
+
+# Real team members' enrolled faces + face embeddings — keep LOCAL, never publish
+data/faces/pranav.jpg
+data/faces/sahiel.jpg
+data/face_gallery.json
+
+# Tuning run artifacts (config/tuned.env — the promoted params — IS committed)
+config/tuning_report.json
+config/*.jsonl

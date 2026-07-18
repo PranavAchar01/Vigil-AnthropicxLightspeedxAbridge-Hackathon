@@ -64,7 +64,7 @@ def main() -> None:
             print(f"  ! {img.name}: no face detected — skipping")
             continue
         pid, name = found
-        gallery.add(pid, name, emb)
+        gallery.add(pid, name, emb, image=img.name)
         print(f"  + {img.name:22s} → {name}")
 
     if len(gallery) == 0:

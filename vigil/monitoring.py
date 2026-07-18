@@ -265,7 +265,8 @@ class MonitorRegistry:
             safety_fuser = EventFuser(window_s=self._fusion_window_s, cooldown_s=0)
             fused = (
                 safety_fuser.add(event)
-                if event.kind in {"fall", "collapse", "companion_alarm"}
+                if event.kind
+                in {"fall", "collapse", "seizure", "unresponsive", "companion_alarm"}
                 else None
             )
             return IngestResult(patient_id=None, fused=fused, safety_only=True)
@@ -462,7 +463,7 @@ def _priority(monitor: PatientMonitor, now: float) -> float:
 
 
 def _deviation_increment(kind: str) -> float:
-    if kind in {"fall", "collapse", "companion_alarm"}:
+    if kind in {"fall", "collapse", "seizure", "unresponsive", "companion_alarm"}:
         return 0.75
     if kind in {"labored_breathing", "non_response", "distress_phrase", "chest_clutch"}:
         return 0.4

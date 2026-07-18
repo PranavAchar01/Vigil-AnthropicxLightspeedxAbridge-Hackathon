@@ -9,17 +9,18 @@ import {
   type AuditView,
   type VigilSession,
 } from "../demoSession";
-
-const BACKEND = process.env.NEXT_PUBLIC_VIGIL_URL || "http://localhost:8000";
+import { useVigilBackend } from "../lib/useVigilBackend";
 
 export default function TrustDashboard() {
+  const backend = useVigilBackend();
   const [session, setSession] = useState<VigilSession>(() => localSession("compliance", 0));
   const [busy, setBusy] = useState(false);
   const [notice, setNotice] = useState("Audit verification is ready.");
 
   const refresh = useCallback(async () => {
     try {
-      const next = await fetchVigilSession(BACKEND, "compliance");
+      if (!backend) throw new Error("Backend unavailable");
+      const next = await fetchVigilSession(backend, "compliance");
       setSession(next);
       return next;
     } catch {
@@ -27,7 +28,7 @@ export default function TrustDashboard() {
       setSession(next);
       return next;
     }
-  }, []);
+  }, [backend]);
 
   useEffect(() => {
     void refresh();
@@ -38,7 +39,8 @@ export default function TrustDashboard() {
     const controller = new AbortController();
     const timeout = window.setTimeout(() => controller.abort(), 1800);
     try {
-      const response = await fetch(`${BACKEND}/api/v1/audit/verify`, {
+      if (!backend) throw new Error("Backend unavailable");
+      const response = await fetch(`${backend}/api/v1/audit/verify`, {
         headers: { "X-Vigil-Role": "compliance" },
         cache: "no-store",
         signal: controller.signal,
@@ -58,7 +60,8 @@ export default function TrustDashboard() {
   const runBreakGlassTest = async () => {
     setBusy(true);
     try {
-      const response = await postVigilCommand(BACKEND, "/api/v1/break-glass", "charge_nurse", {
+      if (!backend) throw new Error("Backend unavailable");
+      const response = await postVigilCommand(backend, "/api/v1/break-glass", "charge_nurse", {
         actor: "Charge RN demo",
         patient_id: "demo-vega",
         reason: "Patient collapsed outside assigned clinical unit",
@@ -103,14 +106,14 @@ export default function TrustDashboard() {
 
       <header className="dashboard-header surface">
         <div>
-          <span className="eyebrow">Governance without patient exposure</span>
-          <h1>Trust & Audit</h1>
-          <p>Verify every access and decision while patient identifiers remain pseudonymized.</p>
+          <span className="eyebrow">Compliance view</span>
+          <h1>Trust and audit</h1>
+          <p>Review access and decisions with patient identifiers replaced by scoped references.</p>
         </div>
         <div className="dashboard-header-controls">
           <span className="role-badge">Compliance view</span>
           <span className={`source-pill ${session.source === "backend" ? "connected" : ""}`}>
-            {session.source === "backend" ? "Backend connected" : "Stage-safe preview"}
+            {session.source === "backend" ? "Backend connected" : "Local replay data"}
           </span>
         </div>
       </header>
@@ -146,8 +149,8 @@ export default function TrustDashboard() {
 
         <aside className="trust-controls">
           <section className="integrity-card surface">
-            <span className="eyebrow">Cryptographic integrity</span>
-            <div className={`integrity-orbit ${session.audit_verified.valid ? "valid" : ""}`}><span /></div>
+            <span className="eyebrow">Chain integrity</span>
+            <div className={`integrity-seal ${session.audit_verified.valid ? "valid" : ""}`}><span /></div>
             <h2>{session.audit_verified.valid ? "Chain verified" : "Verification failed"}</h2>
             <p>Each block commits to the previous hash. Editing any historical action invalidates the remainder of the chain.</p>
             <code>{session.audit_verified.head?.slice(0, 24) ?? "GENESIS"}</code>

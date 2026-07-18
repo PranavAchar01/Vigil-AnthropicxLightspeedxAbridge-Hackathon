@@ -11,6 +11,7 @@ Twilio number. Escalation script is filled at call time via dynamic_variables.
 from __future__ import annotations
 
 import logging
+import threading
 import time
 
 import requests
@@ -23,6 +24,49 @@ from vigil.events import BusEvent, EscalationAction, TriageDecision
 
 log = logging.getLogger("vigil.escalation")
 BASE = "https://api.elevenlabs.io/v1"
+
+# --------------------------------------------------------------------------- #
+# Outbound-call rate limit — so a Twilio TRIAL is NEVER spam-dialed.
+# One successful nurse call per server run by default (VIGIL_MAX_NURSE_CALLS);
+# a placed call is reserved atomically, and released only if it fails to dial.
+# --------------------------------------------------------------------------- #
+MAX_CALLS = settings.max_nurse_calls
+COOLDOWN_S = settings.nurse_call_cooldown_s
+_CALL_LOCK = threading.Lock()
+_CALL_LOG: dict[str, float] = {}  # number -> last successful-dial monotonic time
+_CALL_COUNT = 0
+
+
+def reset_call_gate() -> None:
+    """Clear the outbound-call counter (new demo run / tests)."""
+    global _CALL_COUNT
+    with _CALL_LOCK:
+        _CALL_COUNT = 0
+        _CALL_LOG.clear()
+
+
+def _reserve_call(to_number: str) -> tuple[bool, str]:
+    """Atomically claim a call slot. Returns (allowed, reason_if_blocked)."""
+    global _CALL_COUNT
+    with _CALL_LOCK:
+        now = time.monotonic()
+        if 0 <= MAX_CALLS <= _CALL_COUNT:
+            return False, f"already placed {_CALL_COUNT} call(s); max {MAX_CALLS} per run"
+        last = _CALL_LOG.get(to_number)
+        if last is not None and COOLDOWN_S > 0 and now - last < COOLDOWN_S:
+            return False, f"cooldown {COOLDOWN_S:g}s not elapsed"
+        _CALL_COUNT += 1
+        _CALL_LOG[to_number] = now
+        return True, ""
+
+
+def _release_call(to_number: str) -> None:
+    """Return the slot if the call never actually dialed (so a later real incident can)."""
+    global _CALL_COUNT
+    with _CALL_LOCK:
+        _CALL_COUNT = max(0, _CALL_COUNT - 1)
+        _CALL_LOG.pop(to_number, None)
+
 
 # distress words that make a patient's spoken reply NON-reassuring
 DISTRESS_WORDS = ("help", "can't", "cannot breathe", "chest", "pain", "dizzy", "worse")
@@ -87,6 +131,57 @@ def _fetch_transcript(conversation_id: str, wait_s: float = 25.0) -> list[dict]:
     return turns
 
 
+def _capture_conversation(
+    conversation_id: str, patient_name: str | None, wait_s: float = 120.0
+) -> None:
+    """Poll an ElevenLabs conversation and log each turn (nurse Q + agent A + tool
+    calls) to the Supabase feed — the automatable alternative to a post-call webhook."""
+    from vigil.server import supabase_sink as supa
+
+    seen: set[int] = set()
+    deadline = time.time() + wait_s
+    while time.time() < deadline:
+        try:
+            r = requests.get(
+                f"{BASE}/convai/conversations/{conversation_id}",
+                headers={"xi-api-key": settings.elevenlabs_api_key},
+                timeout=10,
+            )
+            r.raise_for_status()
+            data = r.json()
+            for i, turn in enumerate(data.get("transcript", []) or []):
+                if i in seen:
+                    continue
+                text = (turn.get("message") or turn.get("text") or "").strip()
+                if not text:
+                    continue
+                seen.add(i)
+                who = "nurse" if turn.get("role") in ("user", "human") else "agent"
+                supa.log_event(
+                    "conversation_turn",
+                    source="elevenlabs",
+                    patient=patient_name,
+                    summary=f"{who}: {text[:120]}",
+                    payload={
+                        "role": who,
+                        "text": text,
+                        "conversation_id": conversation_id,
+                        "turn": i,
+                    },
+                )
+            if data.get("status") in ("done", "failed", "processed"):
+                break
+        except Exception as e:  # noqa: BLE001
+            log.debug("conversation capture poll failed: %r", e)
+        time.sleep(2.0)
+
+
+def capture_conversation_async(conversation_id: str, patient_name: str | None) -> None:
+    threading.Thread(
+        target=_capture_conversation, args=(conversation_id, patient_name), daemon=True
+    ).start()
+
+
 class NurseCallHandler:
     """Concrete EscalationHandlers, bound to the incident's chart."""
 
@@ -144,6 +239,25 @@ class NurseCallHandler:
             )
 
     def call_nurse(self, decision: TriageDecision) -> EscalationAction:
+        """Gate every outbound nurse call through the anti-spam limiter, then dial."""
+        to = settings.nurse_phone_number or "nurse"
+        allowed, why = _reserve_call(to)
+        if not allowed:
+            log.info("nurse call suppressed: %s", why)
+            self._emit("suppressed", to=settings.nurse_phone_number, message=why)
+            return EscalationAction(
+                kind="nurse_call",
+                target=settings.nurse_phone_number,
+                message=decision.spoken_summary,
+                status="skipped",
+                provider_ref=why,
+            )
+        action = self._do_call_nurse(decision)
+        if action.status == "failed":  # never dialed → free the slot for a later real incident
+            _release_call(to)
+        return action
+
+    def _do_call_nurse(self, decision: TriageDecision) -> EscalationAction:
         # Prefer the ElevenLabs AI voice when its telephony is configured; otherwise
         # (e.g. a Twilio trial account) place a direct Twilio call, which still works.
         if nurse_call_configured():
@@ -155,6 +269,8 @@ class NurseCallHandler:
                     self._dynamic_vars(decision),
                 )
                 self._emit("ringing", conversation_id=conversation_id)
+                # capture the live nurse<->agent dialogue into the Supabase feed
+                capture_conversation_async(conversation_id, self.chart.name)
                 return EscalationAction(
                     kind="nurse_call",
                     target=settings.nurse_phone_number,

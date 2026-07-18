@@ -37,6 +37,8 @@ class Action(str, Enum):
 PerceptionKind = Literal[
     "fall",
     "collapse",
+    "seizure",
+    "unresponsive",
     "scream",
     "motionless",
     "slump",

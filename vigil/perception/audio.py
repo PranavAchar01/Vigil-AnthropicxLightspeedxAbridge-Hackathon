@@ -1,8 +1,14 @@
 """Real-time scream / human-distress detection from the laptop mic.
 
-Primary backend : Google YAMNet (AudioSet 521 classes) via TF-Hub SavedModel.
-Fallback backend: RMS energy spike x spectral centroid (pure NumPy, no ML deps),
-                  so the demo still works if TensorFlow isn't installed / fails.
+Backend: the Audio Spectrogram Transformer (AST) fine-tuned on AudioSet — a real
+learned audio-event classifier (SOTA open-source on AudioSet), NOT a loudness
+heuristic. It scores 527 AudioSet classes; we watch the human-distress family
+(Screaming, Shout, Yell, Bellow, Whoop, Children shouting, Battle cry). It runs on
+the same torch that YOLO already uses — no TensorFlow, no torchaudio.
+
+Two guards keep it honest so it never "treats anything loud as a scream":
+  * an energy gate skips near-silence, so the model only runs on real sound; and
+  * a 2-of-3-window confirmation rejects single-frame false positives.
 Emits PerceptionEvents(kind="scream") through the sink.
 
 macOS: the terminal/IDE running Python needs Microphone permission
@@ -11,9 +17,11 @@ macOS: the terminal/IDE running Python needs Microphone permission
 
 from __future__ import annotations
 
+import os
 import queue
 import threading
 import time
+from collections import deque
 from typing import Callable
 
 import numpy as np
@@ -21,40 +29,66 @@ import numpy as np
 from vigil.events import Modality, PerceptionEvent
 
 SAMPLE_RATE = 16_000
-WINDOW_SAMPLES = 15_600  # ~0.975 s -> exactly one YAMNet frame
-HOP_SAMPLES = 7_680  # ~0.48 s -> ~2 inferences / second
-COOLDOWN_SEC = 1.5
+WINDOW_SAMPLES = 32_000  # 2.0 s of audio fed to AST (padded internally to its frame len)
+HOP_SAMPLES = 8_000  # 0.5 s -> ~2 inferences / second
+COOLDOWN_SEC = 2.0
+ENERGY_GATE_RMS = 0.006  # below this the room is quiet -> don't even run the model
+CONFIRM_WINDOW = 3  # look back over the last N scored windows
+CONFIRM_HITS = 2  # fire only if >= this many crossed the threshold (kills transients)
 
-# AudioSet distress display_names (matched by name, not hardcoded index).
-DISTRESS = {"Screaming", "Shout", "Yell", "Bellow", "Whoop", "Children shouting"}
+# AudioSet human-distress display_names we treat as a "scream" hard signal
+# (matched by name against the model's label map, never a hardcoded index).
+DISTRESS = ("Screaming", "Shout", "Yell", "Bellow", "Whoop", "Children shouting", "Battle cry")
+
+MODEL_ID = "MIT/ast-finetuned-audioset-10-10-0.4593"
 
 Sink = Callable[[PerceptionEvent], None]
 
 
-class YamnetBackend:
-    THRESHOLD = 0.35
+class ASTBackend:
+    """AST (AudioSet) distress classifier. score() -> P(distress) in [0, 1]."""
+
+    THRESHOLD = 0.30  # sigmoid prob of the loudest distress class; non-screams score ~0.001
 
     def __init__(self) -> None:
-        import csv
+        import torch
+        from transformers import ASTFeatureExtractor, ASTForAudioClassification
 
-        import tensorflow as tf
-        import tensorflow_hub as hub
+        self._torch = torch
+        want = os.environ.get("VIGIL_AUDIO_DEVICE", "cpu").lower()
+        self._device = "mps" if (want == "mps" and torch.backends.mps.is_available()) else "cpu"
+        self._fe = ASTFeatureExtractor.from_pretrained(MODEL_ID)
+        self._model = ASTForAudioClassification.from_pretrained(MODEL_ID).to(self._device).eval()
 
-        self._m = hub.load("https://tfhub.dev/google/yamnet/1")  # Keras-free path
-        with tf.io.gfile.GFile(self._m.class_map_path().numpy()) as f:
-            names = [r["display_name"] for r in csv.DictReader(f)]
-        self._idx = np.array([i for i, n in enumerate(names) if n in DISTRESS], dtype=int)
+        id2label = self._model.config.id2label
+        self._idx = [int(i) for i, n in id2label.items() if n in DISTRESS]
+        if not self._idx:
+            raise RuntimeError("AST label map has no distress classes")
+        self._top = {int(i): n for i, n in id2label.items()}
+
+    def _probs(self, window: np.ndarray):
+        torch = self._torch
+        with torch.no_grad():
+            x = self._fe(window, sampling_rate=SAMPLE_RATE, return_tensors="pt").to(self._device)
+            return torch.sigmoid(self._model(**x).logits)[0]
 
     def score(self, window: np.ndarray) -> float:
-        scores, _emb, _spec = self._m(window)
-        s = scores.numpy().mean(axis=0)
-        return float(s[self._idx].max()) if self._idx.size else 0.0
+        return float(self._probs(window)[self._idx].max())
+
+    def score_verbose(self, window: np.ndarray) -> tuple[float, str, float]:
+        """(distress_score, top_label_name, top_label_prob) — for live tuning/debug."""
+        probs = self._probs(window)
+        distress = float(probs[self._idx].max())
+        top = int(probs.argmax())
+        return distress, self._top.get(top, str(top)), float(probs[top])
 
 
 class HeuristicBackend:
-    """Loud AND high-frequency -> scream-like. No ML deps."""
+    """Last-resort loud-AND-high-frequency detector. OFF by default: the AST model
+    is the real detector. Enable only via VIGIL_ALLOW_HEURISTIC_AUDIO=1 when the
+    model can't be loaded — it is deliberately conservative to avoid false pages."""
 
-    THRESHOLD = 0.60
+    THRESHOLD = 0.80
 
     def __init__(self) -> None:
         self._floor = 1e-3
@@ -69,30 +103,41 @@ class HeuristicBackend:
         ratio = rms / (self._floor + 1e-9)
         if ratio < 3.0:  # only adapt the noise floor when it's quiet
             self._floor = (1 - self._alpha) * self._floor + self._alpha * rms
-        loud = float(np.clip((ratio - 4.0) / 8.0, 0.0, 1.0))
-        bright = float(np.clip((centroid - 1200.0) / 2000.0, 0.0, 1.0))
+        loud = float(np.clip((ratio - 6.0) / 8.0, 0.0, 1.0))
+        bright = float(np.clip((centroid - 1500.0) / 2000.0, 0.0, 1.0))
         return loud * bright
 
 
 def build_backend():
+    """AST is the real backend. Only fall back to the heuristic if it's explicitly
+    allowed; otherwise a missing model disables audio rather than false-firing."""
     try:
-        b = YamnetBackend()
-        print("[audio] YAMNet backend ready")
+        b = ASTBackend()
+        print(f"[audio] AST AudioSet scream classifier ready (device={b._device})")
         return b
-    except Exception as e:  # noqa: BLE001 — any import/download/TF failure -> fallback
-        print(f"[audio] YAMNet unavailable ({e!r}); using heuristic fallback")
-        return HeuristicBackend()
+    except Exception as e:  # noqa: BLE001 — import/download/load failure
+        if os.environ.get("VIGIL_ALLOW_HEURISTIC_AUDIO") == "1":
+            print(f"[audio] AST unavailable ({e!r}); using conservative heuristic fallback")
+            return HeuristicBackend()
+        print(
+            f"[audio] AST scream model unavailable ({e!r}); audio detection DISABLED.\n"
+            f"        Enable it with:  uv pip install transformers   (torch is already present)"
+        )
+        return None
 
 
 class ScreamDetector:
     def __init__(self, sink: Sink, threshold: float | None = None) -> None:
         self._sink = sink
         self._backend = build_backend()
-        self._threshold = threshold if threshold is not None else self._backend.THRESHOLD
+        self._threshold = (
+            threshold if threshold is not None else getattr(self._backend, "THRESHOLD", 0.30)
+        )
         self._q: queue.Queue[np.ndarray] = queue.Queue()
         self._ring = np.zeros(WINDOW_SAMPLES, dtype=np.float32)
         self._since = 0
         self._last_fire = 0.0
+        self._recent: deque[bool] = deque(maxlen=CONFIRM_WINDOW)
 
     def _cb(self, indata, frames, time_info, status):  # PortAudio thread — keep cheap
         self._q.put(indata[:, 0].copy())
@@ -110,11 +155,23 @@ class ScreamDetector:
             if self._since < HOP_SAMPLES:
                 continue
             self._since = 0
-            conf = self._backend.score(self._ring.copy())
-            if conf >= self._threshold:
+
+            window = self._ring.copy()
+            # Energy gate: a scream is loud. Skip the model on a quiet room — saves
+            # CPU and guarantees silence can never score as distress.
+            rms = float(np.sqrt(np.mean(window * window)) + 1e-9)
+            if rms < ENERGY_GATE_RMS:
+                self._recent.append(False)
+                continue
+
+            conf = self._backend.score(window)
+            self._recent.append(conf >= self._threshold)
+            # Confirm across windows: a real scream sustains; a click does not.
+            if sum(self._recent) >= CONFIRM_HITS:
                 now = time.time()
                 if now - self._last_fire >= COOLDOWN_SEC:
                     self._last_fire = now
+                    self._recent.clear()
                     self._sink(
                         PerceptionEvent(
                             ts=now,
@@ -125,6 +182,8 @@ class ScreamDetector:
                     )
 
     def run(self, stop_event) -> None:
+        if self._backend is None:
+            return  # audio disabled; build_backend already explained why
         import sounddevice as sd
 
         threading.Thread(target=self._consume, args=(stop_event,), daemon=True).start()

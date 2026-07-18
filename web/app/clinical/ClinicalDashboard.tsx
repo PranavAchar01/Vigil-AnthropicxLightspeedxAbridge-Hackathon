@@ -13,12 +13,11 @@ import {
   type VigilRole,
   type VigilSession,
 } from "../demoSession";
+import { useVigilBackend } from "../lib/useVigilBackend";
 
 const CLINICAL_ROLES = ROLES.filter((item) =>
   ["charge_nurse", "attending", "triage_nurse"].includes(item.value),
 );
-
-const BACKEND = process.env.NEXT_PUBLIC_VIGIL_URL || "http://localhost:8000";
 
 type Line = { id: number; cls: string; text: string };
 type Caps = Record<string, boolean>;
@@ -54,6 +53,7 @@ function SectionTitle({ index, title, meta }: { index: string; title: string; me
 }
 
 export default function ClinicalDashboard() {
+  const backend = useVigilBackend();
   const [conn, setConn] = useState<"connecting" | "live" | "down">("connecting");
   const [patient, setPatient] = useState<Patient | null>(null);
   const [caps, setCaps] = useState<Caps>({});
@@ -67,7 +67,6 @@ export default function ClinicalDashboard() {
   });
   const [logItems, setLogItems] = useState<string[]>([]);
   const [note, setNote] = useState<{ text: string; bundle?: string } | null>(null);
-  const [camOk, setCamOk] = useState(false);
   const [role, setRole] = useState<VigilRole>("charge_nurse");
   const [session, setSession] = useState<VigilSession>(() => localSession("charge_nurse", 0));
   const [selectedKey, setSelectedKey] = useState("demo-vega");
@@ -81,11 +80,15 @@ export default function ClinicalDashboard() {
   const demoStepRef = useRef(0);
 
   useEffect(() => {
-    traceEnd.current?.scrollIntoView({ block: "end", behavior: "smooth" });
+    traceEnd.current?.scrollIntoView({ block: "end" });
   }, [lines]);
 
   useEffect(() => {
-    const wsUrl = BACKEND.replace(/^http/, "ws") + "/events";
+    if (!backend) {
+      setConn("down");
+      return;
+    }
+    const wsUrl = backend.replace(/^http/, "ws") + "/events";
     let ws: WebSocket | null = null;
     let closed = false;
 
@@ -237,11 +240,12 @@ export default function ClinicalDashboard() {
       closed = true;
       ws?.close();
     };
-  }, []);
+  }, [backend]);
 
   const refreshSession = useCallback(async (nextRole: VigilRole, fallbackStep?: number) => {
     try {
-      const next = await fetchVigilSession(BACKEND, nextRole);
+      if (!backend) throw new Error("Backend unavailable");
+      const next = await fetchVigilSession(backend, nextRole);
       demoStepRef.current = next.demo.step;
       setSession(next);
       setConn((current) => (current === "down" ? "live" : current));
@@ -251,7 +255,7 @@ export default function ClinicalDashboard() {
       setSession(next);
       return next;
     }
-  }, []);
+  }, [backend]);
 
   useEffect(() => {
     void refreshSession(role);
@@ -297,7 +301,8 @@ export default function ClinicalDashboard() {
       const nextStep = Math.min(targetStep ?? demoStepRef.current + 1, 5);
       setCommandBusy(true);
       try {
-        const response = await postVigilCommand(BACKEND, "/api/v1/demo/advance", "charge_nurse");
+        if (!backend) throw new Error("Backend unavailable");
+        const response = await postVigilCommand(backend, "/api/v1/demo/advance", "charge_nurse");
         if (!response.ok) throw new Error("Demo advance unavailable");
         await refreshSession(role, nextStep);
       } catch {
@@ -309,13 +314,14 @@ export default function ClinicalDashboard() {
         setCommandBusy(false);
       }
     },
-    [applyDemoNarrative, refreshSession, role],
+    [applyDemoNarrative, backend, refreshSession, role],
   );
 
   const resetDemo = useCallback(async () => {
     setCommandBusy(true);
     try {
-      const response = await postVigilCommand(BACKEND, "/api/v1/demo/reset", "charge_nurse");
+      if (!backend) throw new Error("Backend unavailable");
+      const response = await postVigilCommand(backend, "/api/v1/demo/reset", "charge_nurse");
       if (!response.ok) throw new Error("Demo reset unavailable");
       await refreshSession(role, 0);
     } catch {
@@ -326,7 +332,7 @@ export default function ClinicalDashboard() {
       setSelectedKey("demo-vega");
       setCommandBusy(false);
     }
-  }, [applyDemoNarrative, refreshSession, role]);
+  }, [applyDemoNarrative, backend, refreshSession, role]);
 
   const playDemo = useCallback(async () => {
     if (demoPlaying) return;
@@ -352,7 +358,8 @@ export default function ClinicalDashboard() {
         const body = outcome === "acknowledge"
           ? { actor: "Charge RN" }
           : { actor: "Charge RN", outcome };
-        const response = await postVigilCommand(BACKEND, path, role, body);
+        if (!backend) throw new Error("Backend unavailable");
+        const response = await postVigilCommand(backend, path, role, body);
         if (!response.ok) throw new Error("Alert update unavailable");
         await refreshSession(role);
       } catch {
@@ -379,11 +386,10 @@ export default function ClinicalDashboard() {
         setCommandBusy(false);
       }
     },
-    [refreshSession, role, selectedKey, session.queue],
+    [backend, refreshSession, role, selectedKey, session.queue],
   );
 
   const capability = (name: string, fallback = false) => Boolean(caps[name] || fallback);
-  const livePerception = capability("live_perception", false);
   const selectedPatient =
     session.queue.find((item) => (item.patient_id ?? item.patient_ref) === selectedKey) ??
     session.queue[0];
@@ -416,7 +422,6 @@ export default function ClinicalDashboard() {
         .map(cleanText)
         .join(" / ")
     : "Recognition begins when a patient enters the camera view.";
-  const canViewObservation = session.scopes.includes("video:view") || role === "attending";
   const selectedAlert = selectedPatient?.alert;
   const limitedRole = role === "front_desk" || role === "security" || role === "compliance";
   const responseActive = Boolean(
@@ -529,43 +534,19 @@ export default function ClinicalDashboard() {
 
       <main className="workspace">
         <section className="workspace-panel observation-panel surface">
-          <SectionTitle index="01" title="Live observation" meta="Camera and patient context" />
+          <SectionTitle index="01" title="Observation" meta="Derived signals and patient context" />
 
-          <div className="video-frame inset-surface">
-            {livePerception && canViewObservation ? (
-              <img
-                src={`${BACKEND}/video`}
-                alt="Live waiting room pose feed"
-                onLoad={(event) => {
-                  if ((event.target as HTMLImageElement).naturalWidth) setCamOk(true);
-                }}
-                onError={() => setCamOk(false)}
-                style={{ display: camOk ? "block" : "none" }}
-              />
-            ) : null}
-            <div className="video-hud">
-              <span>CAM 01</span>
-              <span className={camOk && canViewObservation && livePerception ? "hud-live" : ""}>
-                {!canViewObservation ? "Restricted" : livePerception ? (camOk ? "Streaming" : "Standby") : "Replay"}
-              </span>
+          <div className="observation-summary inset-surface">
+            <div className="observation-summary-head">
+              <div><span className="eyebrow">Input status</span><h3>Camera 01</h3></div>
+              <span className={`source-pill ${capability("live_perception") ? "connected" : ""}`}>{capability("live_perception") ? "Edge connected" : "Replay input"}</span>
             </div>
-            {!camOk || !canViewObservation || !livePerception ? (
-              <div className="camera-empty">
-                <div className="scanner" aria-hidden="true">
-                  <i />
-                </div>
-                <strong>
-                  {!canViewObservation ? "Video omitted by role scope" : livePerception ? "Camera ready" : "Replay ready"}
-                </strong>
-                <span>
-                  {!canViewObservation
-                    ? "The server did not send video data"
-                    : livePerception
-                      ? "Waiting for the edge feed"
-                      : "Live perception is disabled for this deployment"}
-                </span>
-              </div>
-            ) : null}
+            <div className="observation-signal-grid">
+              <div><span>Pose events</span><strong>{selectedPatient?.latest_signal ?? "Stable baseline"}</strong></div>
+              <div><span>Patient binding</span><strong>{selectedPatient?.seat ? `Seat ${selectedPatient.seat}` : "No seat selected"}</strong></div>
+              <div><span>Privacy output</span><strong>Derived events only</strong></div>
+            </div>
+            <p className="observation-policy">The stage dashboard does not load a live image. The edge process sends pose, audio, and identity events to the backend.</p>
           </div>
 
           <article className="patient-card inset-surface">
@@ -639,7 +620,7 @@ export default function ClinicalDashboard() {
           {session.scopes.includes("reason:read") ? (
             <>
               <div className="reasoning-status inset-surface">
-                <div className="pulse-graph" aria-hidden="true"><i /><i /><i /><i /><i /></div>
+                <span className="state-mark" aria-hidden="true" />
                 <div>
                   <span className="eyebrow">Current state</span>
                   <strong>{banner.alert ? "Review in progress" : "Continuous monitoring"}</strong>
@@ -677,7 +658,7 @@ export default function ClinicalDashboard() {
           <SectionTitle index="03" title="Response" meta="Escalation and record" />
 
           <div className={`response-state inset-surface ${responseActive ? "alert" : ""}`}>
-            <div className="response-orbit"><span /></div>
+            <span className="response-mark" aria-hidden="true" />
             <div>
               <span className="eyebrow">Escalation state</span>
               <h3>{responseTitle}</h3>

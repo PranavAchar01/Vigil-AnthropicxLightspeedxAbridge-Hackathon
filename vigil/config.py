@@ -13,6 +13,11 @@ try:
     from dotenv import load_dotenv
 
     load_dotenv()
+    # Promoted params from the closed-loop tuner (scripts/tune.py) override defaults
+    # for every AI. Loaded into os.environ BEFORE settings + the vision Params read it.
+    _tuned = Path(__file__).resolve().parent.parent / "config" / "tuned.env"
+    if _tuned.exists():
+        load_dotenv(_tuned, override=True)
 except ModuleNotFoundError:  # dotenv is a declared dep; tolerate running pre-`uv sync`
     pass
 
@@ -51,6 +56,13 @@ class Settings:
         default_factory=lambda: _env("ELEVENLABS_PHONE_NUMBER_ID")
     )
     nurse_phone_number: str = field(default_factory=lambda: _env("NURSE_PHONE_NUMBER"))
+    # Anti-spam: cap outbound nurse calls so a Twilio TRIAL is never spam-dialed.
+    # Default = ONE call per server run. -1 = unlimited; a cooldown (seconds) can
+    # instead space repeat calls when the cap is raised.
+    max_nurse_calls: int = field(default_factory=lambda: int(_envf("VIGIL_MAX_NURSE_CALLS", 1)))
+    nurse_call_cooldown_s: float = field(
+        default_factory=lambda: _envf("VIGIL_NURSE_CALL_COOLDOWN_S", 0.0)
+    )
     # optional: real voice check-in with the patient before paging (soft signals)
     patient_kiosk_number: str = field(default_factory=lambda: _env("PATIENT_KIOSK_NUMBER"))
     elevenlabs_checkin_agent_id: str = field(
@@ -100,6 +112,15 @@ class Settings:
     cohort_path: Path = field(
         default_factory=lambda: Path(__file__).resolve().parent.parent / "data" / "demo_cohort.json"
     )
+    # Dedicated pre-trained fall-detection YOLO (runs alongside the pose FSM).
+    fall_model_path: Path = field(
+        default_factory=lambda: Path(
+            _env(
+                "VIGIL_FALL_MODEL",
+                str(Path(__file__).resolve().parent.parent / "models" / "fall_yolov11.pt"),
+            )
+        )
+    )
 
     # --- Perception tuning ---
     perception_enabled: bool = field(
@@ -113,11 +134,17 @@ class Settings:
     motionless_seconds: float = field(
         default_factory=lambda: _envf("VIGIL_MOTIONLESS_SECONDS", 540.0)
     )
-    # Scream classifier score above which we emit a scream event.
-    scream_threshold: float = field(default_factory=lambda: _envf("VIGIL_SCREAM_THRESHOLD", 0.4))
+    # AST scream classifier: sigmoid prob of the loudest AudioSet distress class
+    # above which we emit a scream event. Non-scream sound scores ~0.001, so 0.30
+    # gives near-zero false positives with high recall on real screams.
+    scream_threshold: float = field(default_factory=lambda: _envf("VIGIL_SCREAM_THRESHOLD", 0.3))
     # Window (seconds) in which a scream and a fall count as one fused hard event.
     fusion_window_seconds: float = field(
         default_factory=lambda: _envf("VIGIL_FUSION_WINDOW_SECONDS", 4.0)
+    )
+    # Cooldown (seconds) suppressing re-fires of the same-or-lower-severity emergency.
+    fusion_cooldown_seconds: float = field(
+        default_factory=lambda: _envf("VIGIL_FUSION_COOLDOWN_SECONDS", 8.0)
     )
 
     def require(self, *names: str) -> None:

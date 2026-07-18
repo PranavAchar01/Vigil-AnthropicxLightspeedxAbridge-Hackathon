@@ -13,7 +13,13 @@ from collections import deque
 from vigil.events import FusedEvent, PerceptionEvent, PerceptionKind, Severity
 
 # Signals that, on their own, already warrant a hard (page-now) response.
-HARD_ALONE: set[PerceptionKind] = {"fall", "collapse", "companion_alarm"}
+HARD_ALONE: set[PerceptionKind] = {
+    "fall",
+    "collapse",
+    "seizure",
+    "unresponsive",
+    "companion_alarm",
+}
 # Signals that are ambiguous alone → voice check-in first.
 SOFT_ALONE: set[PerceptionKind] = {
     "motionless",
@@ -75,15 +81,46 @@ class EventFuser:
         while self._buf and now - self._buf[0].ts > self.window_s:
             self._buf.popleft()
 
+    # priority order when several signals co-occur (drives the label picked)
+    _HARD_ORDER: tuple[PerceptionKind, ...] = (
+        "fall",
+        "seizure",
+        "collapse",
+        "unresponsive",
+        "companion_alarm",
+    )
+    _SOFT_ORDER: tuple[PerceptionKind, ...] = (
+        "chest_clutch",
+        "slump",
+        "motionless",
+        "agitation",
+        "gait_instability",
+        "labored_breathing",
+        "distress_phrase",
+        "non_response",
+    )
+    _HARD_LABEL = {
+        "fall": "Fall detected: patient on the ground",
+        "seizure": "Seizure: convulsive movement detected",
+        "collapse": "Collapse or faint: slumped then motionless",
+        "unresponsive": "Unresponsive: prolonged motionlessness",
+        "companion_alarm": "Companion requested urgent help",
+    }
+    _SOFT_LABEL = {
+        "chest_clutch": "Distress gesture: hand to chest, throat, or head",
+        "slump": "Posture degraded / slumping",
+        "motionless": "Prolonged motionlessness",
+        "agitation": "Agitation / restlessness",
+        "gait_instability": "Gait instability detected",
+        "labored_breathing": "Possible labored breathing",
+        "distress_phrase": "Patient reported worsening symptoms",
+        "non_response": "No response to directed check-in",
+    }
+
     def _classify(
         self, kinds: set[PerceptionKind], conf: dict[PerceptionKind, float]
     ) -> tuple[Severity | None, list[PerceptionKind], str]:
-        has_fall = "fall" in kinds
-        has_collapse = "collapse" in kinds
         has_scream = "scream" in kinds
-        if "companion_alarm" in kinds:
-            return Severity.HARD, ["companion_alarm"], "Companion requested urgent help"
-
         visual_soft = kinds.intersection(
             {"motionless", "slump", "agitation", "chest_clutch", "gait_instability"}
         )
@@ -98,34 +135,23 @@ class EventFuser:
                 "labored_breathing" if "labored_breathing" in kinds else "scream",
             ]
             return Severity.HARD, fused, "Distress signal followed by no response"
-        down = has_fall or has_collapse
-        down_kind: PerceptionKind = "collapse" if has_collapse else "fall"
 
-        if down and has_scream:
-            return Severity.HARD, ["scream", down_kind], "Scream + collapse detected"
-        if has_collapse:
-            return Severity.HARD, ["collapse"], "Patient collapsed and is motionless"
-        if has_fall:
-            return Severity.HARD, ["fall"], "Collapse detected"
+        hard = [k for k in self._HARD_ORDER if k in kinds]
+
+        # Any hard visual signal → page now; fuse a co-occurring scream for extra weight.
+        if hard:
+            primary = hard[0]
+            fused: list[PerceptionKind] = [primary] + (["scream"] if has_scream else [])
+            summary = self._HARD_LABEL[primary] + (" + scream" if has_scream else "")
+            return Severity.HARD, fused, summary
         if has_scream and conf.get("scream", 0.0) >= 0.6:
             return Severity.HARD, ["scream"], "Loud scream / distress detected"
         if has_scream:
             return Severity.SOFT, ["scream"], "Possible distress vocalization"
 
-        soft = [k for k in kinds if k in SOFT_ALONE]
+        soft = [k for k in self._SOFT_ORDER if k in kinds]
         if soft:
-            label = {
-                "motionless": "Prolonged motionlessness",
-                "slump": "Posture degraded / slumping",
-                "agitation": "Agitation / pacing",
-                "chest_clutch": "Repeated guarding at the chest",
-                "gait_instability": "Gait instability detected",
-                "labored_breathing": "Possible labored breathing",
-                "distress_phrase": "Patient reported worsening symptoms",
-                "non_response": "No response to directed check-in",
-            }
-            primary = soft[0]
-            return Severity.SOFT, [primary], label[primary]
+            return Severity.SOFT, [soft[0]], self._SOFT_LABEL[soft[0]]
 
         return None, [], ""
 

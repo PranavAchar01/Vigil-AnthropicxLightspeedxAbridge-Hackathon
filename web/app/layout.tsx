@@ -6,17 +6,15 @@ const siteUrl = process.env.NEXT_PUBLIC_SITE_URL || "https://web-pink-chi-71.ver
 export const metadata: Metadata = {
   metadataBase: new URL(siteUrl),
   title: "Vigil | Command Center",
-  description: "Live patient monitoring, clinical reasoning, and escalation in one command center.",
+  description: "Continuous waiting-room re-triage with role-scoped response and audit tools.",
   openGraph: {
     title: "Vigil | Command Center",
-    description: "Live patient monitoring, clinical reasoning, and escalation in one command center.",
-    images: [{ url: "/vigil-preview.png", width: 1200, height: 630, alt: "Vigil clinical command center" }],
+    description: "Continuous waiting-room re-triage with role-scoped response and audit tools.",
   },
   twitter: {
-    card: "summary_large_image",
+    card: "summary",
     title: "Vigil | Command Center",
-    description: "Live patient monitoring, clinical reasoning, and escalation in one command center.",
-    images: ["/vigil-preview.png"],
+    description: "Continuous waiting-room re-triage with role-scoped response and audit tools.",
   },
 };
 

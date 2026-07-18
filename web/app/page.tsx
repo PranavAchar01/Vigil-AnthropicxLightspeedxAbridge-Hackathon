@@ -3,76 +3,71 @@
 import Link from "next/link";
 import { useEffect, useState } from "react";
 import AgentPipeline from "./AgentPipeline";
+import BackendFeed from "./BackendFeed";
 import DashboardNav from "./DashboardNav";
 import { fetchVigilSession, localSession, type VigilSession } from "./demoSession";
-
-const BACKEND = process.env.NEXT_PUBLIC_VIGIL_URL || "http://localhost:8000";
+import { useVigilBackend } from "./lib/useVigilBackend";
 
 const dashboards = [
   {
-    index: "01",
     href: "/clinical",
-    title: "Clinical Command Center",
-    roles: "Charge nurse / triage / attending",
-    description: "Ranked queue, multimodal evidence, re-triage decisions, escalation, and documentation.",
-    action: "Open clinical",
+    label: "Clinical",
+    title: "Re-triage and response",
+    copy: "Review the ranked queue, inspect chart-grounded reasoning, and close an alert.",
+    meta: "Charge nurse and clinical staff",
   },
   {
-    index: "02",
     href: "/operations",
-    title: "Waiting Room Operations",
-    roles: "Front desk / security",
-    description: "Seat-level awareness and medical-assist routing with minimum-necessary access.",
-    action: "Open operations",
+    label: "Operations",
+    title: "Seat-level coordination",
+    copy: "Route a medical-assist request without exposing diagnoses, ESI, or camera data.",
+    meta: "Front desk and security",
   },
   {
-    index: "03",
     href: "/trust",
-    title: "Trust & Audit",
-    roles: "Compliance",
-    description: "Hash-chain verification, access history, redaction, and emergency-access controls.",
-    action: "Open trust view",
+    label: "Trust",
+    title: "Access and audit record",
+    copy: "Verify the linked audit chain and test time-limited emergency access.",
+    meta: "Compliance",
   },
 ];
 
-export default function JudgeDemo() {
-  const [session, setSession] = useState<VigilSession>(() => localSession("charge_nurse", 0));
+export default function OverviewPage() {
+  const backend = useVigilBackend();
+  const [session, setSession] = useState<VigilSession>(() => localSession("charge_nurse", 2));
   const [capabilities, setCapabilities] = useState<Record<string, boolean>>({
     multi_patient: true,
-    role_redaction: true,
     audit_chain: true,
     demo_replay: true,
+    role_redaction: true,
   });
 
   useEffect(() => {
-    let active = true;
+    if (!backend) return;
     const controller = new AbortController();
     const timeout = window.setTimeout(() => controller.abort(), 2200);
-
     void Promise.all([
-      fetchVigilSession(BACKEND, "charge_nurse"),
-      fetch(`${BACKEND}/health`, { cache: "no-store", signal: controller.signal }).then(async (response) => {
+      fetchVigilSession(backend, "charge_nurse"),
+      fetch(`${backend}/health`, { cache: "no-store", signal: controller.signal }).then(async (response) => {
         if (!response.ok) throw new Error("Health request unavailable");
         const payload = await response.json();
         return (payload.capabilities ?? {}) as Record<string, boolean>;
       }),
     ])
       .then(([nextSession, nextCapabilities]) => {
-        if (!active) return;
         setSession(nextSession);
         setCapabilities(nextCapabilities);
       })
       .catch(() => undefined)
       .finally(() => window.clearTimeout(timeout));
-
     return () => {
-      active = false;
       controller.abort();
       window.clearTimeout(timeout);
     };
-  }, []);
+  }, [backend]);
 
   const activeAlerts = session.queue.filter((patient) => patient.alert).length;
+  const topPatient = session.queue[0];
 
   return (
     <div className="app-shell overview-shell">
@@ -83,85 +78,59 @@ export default function JudgeDemo() {
       <main className="judge-overview">
         <section className="judge-hero surface">
           <div className="judge-hero-copy">
-            <span className="eyebrow">Continuous safety between triage and treatment</span>
-            <h1>Catch deterioration before the wait becomes the risk.</h1>
-            <p>
-              Vigil monitors consenting waiting-room patients, corroborates change across signals,
-              re-ranks urgency, closes the nurse response loop, and leaves a verifiable clinical record.
-            </p>
+            <span className="eyebrow">Continuous re-triage</span>
+            <h1>A waiting room that can notice when a patient changes.</h1>
+            <p>Vigil watches consented patients after intake. It compares new signals with the chart, updates the queue, contacts staff, and records the response.</p>
             <div className="judge-actions">
-              <Link className="button-link primary" href="/clinical">Start the judge demo</Link>
-              <Link className="button-link" href="/trust">Inspect the audit trail</Link>
+              <Link className="button-link primary" href="/clinical">Run the clinical demo</Link>
+              <Link className="button-link" href="/operations">Open operations</Link>
             </div>
           </div>
 
           <div className="judge-system-card inset-surface">
             <div className="system-card-topline">
-              <span>Live system state</span>
-              <strong className={session.source === "backend" ? "connected" : "preview"}>
-                {session.source === "backend" ? "Backend connected" : "Preview mode"}
-              </strong>
-            </div>
-            <div className="overview-metrics">
-              <div><strong>{session.queue.length}</strong><span>patients monitored</span></div>
-              <div><strong>{activeAlerts}</strong><span>active escalations</span></div>
-              <div><strong>{session.audit_verified.blocks}</strong><span>verified audit blocks</span></div>
-              <div><strong>6</strong><span>protected roles</span></div>
+              <span>Current session</span>
+              <strong className={session.source === "backend" ? "connected" : "preview"}>{session.source === "backend" ? "Backend connected" : "Replay data"}</strong>
             </div>
             <div className="overview-priority">
-              <span>Highest current priority</span>
-              <strong>{session.queue[0]?.name ?? "Identity protected"}</strong>
-              <small>
-                {session.queue[0]?.current_esi ? `ESI ${session.queue[0].current_esi}` : "Role-filtered"}
-                {session.queue[0]?.seat ? ` / Seat ${session.queue[0].seat}` : ""}
-              </small>
+              <span>First in queue</span>
+              <strong>{topPatient?.name ?? "Identity protected"}</strong>
+              <small>{topPatient?.current_esi ? `ESI ${topPatient.current_esi}` : "Clinical fields restricted"}{topPatient?.seat ? ` / Seat ${topPatient.seat}` : ""}</small>
+            </div>
+            <div className="overview-metrics">
+              <div><strong>{session.queue.length}</strong><span>patients</span></div>
+              <div><strong>{activeAlerts}</strong><span>open alerts</span></div>
+              <div><strong>{session.audit_verified.blocks}</strong><span>audit blocks</span></div>
             </div>
           </div>
         </section>
 
-        <AgentPipeline capabilities={capabilities} source={session.source} />
-
         <section className="dashboard-directory" aria-labelledby="dashboard-heading">
           <div className="directory-heading">
-            <div>
-              <span className="eyebrow">Three views, one source of truth</span>
-              <h2 id="dashboard-heading">Purpose-built for the people responding</h2>
-            </div>
-            <p>Every screen reads the same patient registry and audit chain. The backend removes fields a role cannot access.</p>
+            <div><span className="eyebrow">Demo views</span><h2 id="dashboard-heading">One backend, three staff views</h2></div>
+            <p>The API filters each response by role. The dashboards do not hide restricted fields after they arrive.</p>
           </div>
           <div className="dashboard-card-grid">
-            {dashboards.map((dashboard) => (
+            {dashboards.map((dashboard, index) => (
               <Link className="dashboard-link-card surface" href={dashboard.href} key={dashboard.href}>
-                <span className="dashboard-card-index">{dashboard.index}</span>
-                <div>
-                  <h3>{dashboard.title}</h3>
-                  <small>{dashboard.roles}</small>
-                  <p>{dashboard.description}</p>
-                </div>
-                <strong>{dashboard.action}<i aria-hidden="true">→</i></strong>
+                <span className="dashboard-card-index">0{index + 1}</span>
+                <div><small>{dashboard.label}</small><h3>{dashboard.title}</h3><p>{dashboard.copy}</p></div>
+                <strong>{dashboard.meta}<i aria-hidden="true">Open</i></strong>
               </Link>
             ))}
           </div>
         </section>
 
+        <AgentPipeline capabilities={capabilities} source={session.source} />
+
         <section className="judge-flow surface">
-          <span className="eyebrow">The sixty-second story</span>
+          <div className="directory-heading"><div><span className="eyebrow">Demo sequence</span><h2>What the judges can try</h2></div><p>Use the replay when a camera or external service is unavailable. The same command API receives each action.</p></div>
           <div className="judge-flow-grid">
-            {[
-              ["Observe", "A patient deviates from their own baseline."],
-              ["Corroborate", "Independent visual and audio signals increase confidence."],
-              ["Re-triage", "Chart risk and deterministic safety floors raise urgency."],
-              ["Respond", "The right staff member receives and acknowledges the alert."],
-              ["Document", "SOAP, FHIR Provenance, and the audit chain preserve the record."],
-            ].map(([title, copy], index) => (
-              <article key={title}>
-                <span>{String(index + 1).padStart(2, "0")}</span>
-                <strong>{title}</strong>
-                <p>{copy}</p>
-              </article>
-            ))}
+            {["Advance a patient signal", "Review the ESI change", "Acknowledge the alert", "Verify the audit block"].map((item, index) => <article key={item}><span>0{index + 1}</span><strong>{item}</strong></article>)}
           </div>
         </section>
+
+        <BackendFeed audit={session.audit} />
       </main>
     </div>
   );

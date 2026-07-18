@@ -10,8 +10,8 @@ import {
   type VigilRole,
   type VigilSession,
 } from "../demoSession";
+import { useVigilBackend } from "../lib/useVigilBackend";
 
-const BACKEND = process.env.NEXT_PUBLIC_VIGIL_URL || "http://localhost:8000";
 const OPERATIONS_ROLES: Array<{ value: VigilRole; label: string }> = [
   { value: "front_desk", label: "Front desk" },
   { value: "security", label: "Security" },
@@ -21,6 +21,7 @@ const patientKey = (patient: QueuePatient, index = 0) =>
   patient.patient_id ?? patient.patient_ref ?? patient.seat ?? `seat-${index}`;
 
 export default function OperationsDashboard() {
+  const backend = useVigilBackend();
   const [role, setRole] = useState<VigilRole>("front_desk");
   const [session, setSession] = useState<VigilSession>(() => localSession("front_desk", 0));
   const [selectedKey, setSelectedKey] = useState(() => patientKey(session.queue[0]));
@@ -29,7 +30,8 @@ export default function OperationsDashboard() {
 
   const refresh = useCallback(async (nextRole: VigilRole) => {
     try {
-      const next = await fetchVigilSession(BACKEND, nextRole);
+      if (!backend) throw new Error("Backend unavailable");
+      const next = await fetchVigilSession(backend, nextRole);
       setSession(next);
       return next;
     } catch {
@@ -37,7 +39,7 @@ export default function OperationsDashboard() {
       setSession(next);
       return next;
     }
-  }, []);
+  }, [backend]);
 
   useEffect(() => {
     void refresh(role).then((next) => setSelectedKey(patientKey(next.queue[0])));
@@ -59,7 +61,8 @@ export default function OperationsDashboard() {
     if (!selected?.seat) return;
     setBusy(true);
     try {
-      const response = await postVigilCommand(BACKEND, "/api/v1/operations/medical-assist", role, {
+      if (!backend) throw new Error("Backend unavailable");
+      const response = await postVigilCommand(backend, "/api/v1/operations/medical-assist", role, {
         actor: role === "security" ? "Security desk" : "Front desk",
         seat: selected.seat,
         reason: "Patient or companion requested clinical help",
@@ -91,9 +94,9 @@ export default function OperationsDashboard() {
 
       <header className="dashboard-header surface">
         <div>
-          <span className="eyebrow">Minimum-necessary coordination</span>
-          <h1>Waiting Room Operations</h1>
-          <p>Route help by person or seat without exposing chart details, clinical reasoning, or camera data.</p>
+          <span className="eyebrow">Waiting room 01</span>
+          <h1>Operations</h1>
+          <p>Route help by seat. Clinical details and camera data are not included in this view.</p>
         </div>
         <div className="dashboard-header-controls">
           <label className="role-control">
@@ -107,7 +110,7 @@ export default function OperationsDashboard() {
             </select>
           </label>
           <span className={`source-pill ${session.source === "backend" ? "connected" : ""}`}>
-            {session.source === "backend" ? "Backend connected" : "Stage-safe preview"}
+            {session.source === "backend" ? "Backend connected" : "Local replay data"}
           </span>
         </div>
       </header>
@@ -116,13 +119,13 @@ export default function OperationsDashboard() {
         <article className="metric-card surface"><span>Occupied seats</span><strong>{session.queue.length}</strong><small>Monitored locations</small></article>
         <article className="metric-card surface"><span>Needs attention</span><strong>{flaggedCount}</strong><small>Seat-level flags</small></article>
         <article className="metric-card surface"><span>Longest wait</span><strong>{longestWait || "Restricted"}</strong><small>{longestWait ? "minutes" : "Not in this role scope"}</small></article>
-        <article className="metric-card surface"><span>Privacy boundary</span><strong>Active</strong><small>{session.scopes.length} scoped permissions</small></article>
+        <article className="metric-card surface"><span>Role filter</span><strong>Active</strong><small>{session.scopes.length} scoped permissions</small></article>
       </section>
 
       <main className="operations-workspace">
         <section className="seat-board surface">
           <div className="panel-heading-row">
-            <div><span className="eyebrow">Waiting room 01</span><h2>Seat board</h2></div>
+            <div><span className="eyebrow">Current occupancy</span><h2>Seat board</h2></div>
             <button type="button" onClick={() => void refresh(role)} disabled={busy}>Refresh</button>
           </div>
           <div className="seat-grid">
@@ -148,7 +151,7 @@ export default function OperationsDashboard() {
         </section>
 
         <aside className="operations-action surface">
-          <span className="eyebrow">Selected location</span>
+          <span className="eyebrow">Selected seat</span>
           <div className="selected-location">
             <strong>{selected?.seat ?? "No seat"}</strong>
             <div>

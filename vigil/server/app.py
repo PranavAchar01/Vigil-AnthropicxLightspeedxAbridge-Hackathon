@@ -39,7 +39,6 @@ from vigil.escalation.ladder import run_ladder
 from vigil.escalation.twilio_call import twilio_call_configured
 from vigil.events import BusEvent, EscalationAction, FusedEvent, PerceptionEvent
 from vigil.monitoring import MonitorRegistry
-from vigil.perception.fusion import EventFuser
 from vigil.reasoning import triage
 from vigil.reasoning.rules import decide_tier_zero
 from vigil.reasoning.triage import ReasoningNotConfigured
@@ -58,7 +57,6 @@ FONTS = DASHBOARD_DIR / "fonts.css"
 
 bus = EventBus()
 frames = FrameBuffer()
-fuser = EventFuser(window_s=settings.fusion_window_seconds)
 registry = MonitorRegistry(fusion_window_s=settings.fusion_window_seconds)
 audit = AuditChain()
 break_glass = BreakGlassManager()
@@ -82,19 +80,44 @@ def _load_cohort() -> None:
         return
     charts = load_cohort(settings.cohort_path)
     state.charts = {c.patient_id: c for c in charts}
-    hero = next(
-        (c for c in charts if "covid" in c.visit_title.lower()), charts[0] if charts else None
-    )
-    state.active_id = hero.patient_id if hero else ""
-    log.info(
-        "loaded %d patients; active = %s",
-        len(charts),
-        state.charts.get(state.active_id, PatientChart("", "", "?", "", None, "")).name,
-    )
+    # No patient is shown until the camera RECOGNIZES a face (face -> active -> chart).
+    state.active_id = ""
+    log.info("loaded %d patients; awaiting face recognition to bind a chart", len(charts))
 
 
 def _active() -> PatientChart | None:
     return state.charts.get(state.active_id)
+
+
+def _fallback_patient_id() -> str:
+    """When a distress signal fires before a face is recognized, bind it to a patient
+    anyway (first in the cohort) so the incident still shows. Face recognition, when it
+    lands, overrides this via state.active_id."""
+    return next(iter(state.charts), "")
+
+
+class _Gallery:
+    gallery = None
+    loaded = False
+
+
+def _face_gallery():
+    """Lazy-load the enrolled face gallery once (for avatar lookup); None if absent."""
+    if not _Gallery.loaded:
+        _Gallery.loaded = True
+        if settings.face_gallery_path.exists():
+            try:
+                from vigil.perception.faces import FaceGallery
+
+                _Gallery.gallery = FaceGallery.load(settings.face_gallery_path)
+            except Exception:  # noqa: BLE001
+                _Gallery.gallery = None
+    return _Gallery.gallery
+
+
+def _avatar_for(patient_id: str) -> str | None:
+    g = _face_gallery()
+    return f"/faces/{patient_id}.jpg" if (g and g.image_for(patient_id)) else None
 
 
 def _capabilities() -> dict[str, bool]:
@@ -109,6 +132,7 @@ def _capabilities() -> dict[str, bool]:
         "audit_chain": True,
         "demo_replay": True,
         "live_perception": settings.perception_enabled,
+        "fall_model": settings.fall_model_path.exists(),
     }
 
 
@@ -129,7 +153,7 @@ def _mirror(event: BusEvent) -> None:
         source = "vision"
     elif t == "decision":
         summary = (
-            f"ESI {p.get('prior_esi')}→{p.get('new_esi')} · "
+            f"ESI {p.get('prior_esi')} to {p.get('new_esi')} / "
             f"{str(p.get('action')).replace('_', ' ')}"
         )
         source = "claude"
@@ -137,7 +161,7 @@ def _mirror(event: BusEvent) -> None:
         summary = f"nurse call: {p.get('status')}"
         source = "elevenlabs"
     elif t == "escalation":
-        summary = f"{str(p.get('kind')).replace('_', ' ')} → {p.get('status')}"
+        summary = f"{str(p.get('kind')).replace('_', ' ')}: {p.get('status')}"
         source = "vigil"
     elif t == "note":
         summary = "ambient SOAP note + FHIR bundle written"
@@ -155,8 +179,17 @@ def _mirror(event: BusEvent) -> None:
 def _on_perception(ev: PerceptionEvent) -> None:
     """Runs on the loop thread (scheduled via call_soon_threadsafe)."""
     bus.publish(BusEvent(type="perception", payload=ev.model_dump()))
-    if ev.kind in ("fall", "collapse", "scream") and state.active_id:
-        pstatus.mark_event(state.active_id, ev.kind)
+    if ev.kind in (
+        "fall",
+        "collapse",
+        "seizure",
+        "unresponsive",
+        "chest_clutch",
+        "scream",
+    ):
+        patient_id = state.active_id or _fallback_patient_id()
+        if patient_id:
+            pstatus.mark_event(patient_id, ev.kind)
     # Route by persistent track binding. The first live track inherits the
     # currently recognized patient, then remains independent of later changes.
     binding = registry.binding(ev.track_id, now=ev.ts)
@@ -187,8 +220,16 @@ async def _stream_text(kind: str, text: str, delay: float = 0.025) -> None:
 async def handle_incident(fused: FusedEvent, patient_id: str | None = None) -> None:
     chart = state.charts.get(patient_id or "") or _active()
     if chart is None:
-        log.warning("incident with no active patient; ignoring")
-        return
+        # A distress signal fired before a face was recognized. Bind it to a patient
+        # anyway so the incident shows and the nurse still gets paged (fail toward care).
+        pid = _fallback_patient_id()
+        chart = state.charts.get(pid)
+        if chart is None:
+            log.warning("incident but no patients loaded; ignoring")
+            return
+        state.active_id = pid
+        bus.publish(BusEvent(type="patient", payload=_patient_payload(chart)))
+        log.info("incident with no recognized face — bound to %s (fallback)", chart.name)
 
     bus.publish(BusEvent(type="fused", payload=fused.model_dump()))
     bus.publish(
@@ -290,7 +331,7 @@ def _vision_identify(pid: str, name: str, score: float) -> None:
         "identify",
         source="vision",
         patient=chart.name,
-        summary=f"face recognized → {chart.name} (match {score})",
+        summary=f"face recognized: {chart.name} (match {score})",
         payload={"patient_id": pid, "score": score},
     )
 
@@ -330,6 +371,10 @@ async def lifespan(app: FastAPI):
     state.charts.update(demo.charts)
     if not state.active_id and demo.charts:
         state.active_id = next(iter(demo.charts))
+    # Publish our public URL so the Vercel page can discover this backend at load
+    # time (set by scripts/serve_public.py once the tunnel is up).
+    if settings.public_url:
+        supa.set_backend_url(settings.public_url)
 
     def sink(ev: PerceptionEvent) -> None:  # called from perception threads
         loop.call_soon_threadsafe(_on_perception, ev)
@@ -379,6 +424,17 @@ async def health():
     return JSONResponse({"capabilities": _capabilities(), "active_patient": state.active_id})
 
 
+@app.get("/faces/{patient_id}.jpg")
+def patient_avatar(patient_id: str):
+    """Serve the enrolled face image for a patient (chart-card avatar)."""
+    g = _face_gallery()
+    img = g.image_for(patient_id) if g else None
+    path = (settings.cohort_path.parent / "faces" / img) if img else None
+    if path and path.exists():
+        return FileResponse(path, media_type="image/jpeg")
+    raise HTTPException(status_code=404, detail="no avatar")
+
+
 @app.get("/agent/patient-status/{patient_id}")
 def patient_status(patient_id: str, x_vigil_token: str = Header(default="")):
     """The voice agent's get_patient_status webhook tool hits this mid-call.
@@ -403,7 +459,7 @@ def patient_status_active(x_vigil_token: str = Header(default="")):
         "tool_call",
         source="agent",
         patient=chart.name if chart else None,
-        summary=f"voice agent pulled live status → {snap.get('posture')}, "
+        summary=f"voice agent pulled live status: {snap.get('posture')}, "
         f"{snap.get('motion_level')}, ESI {snap.get('triage', {}).get('esi_level')}",
         payload=snap,
     )
@@ -435,6 +491,17 @@ async def elevenlabs_webhook(request: Request):
     return JSONResponse({"ok": True, "turns": len(transcript)})
 
 
+@app.post("/agent/capture/{conversation_id}")
+async def capture(conversation_id: str):
+    """Manually capture an ElevenLabs conversation's transcript into the feed
+    (e.g. after a 'Talk to agent' widget test — pass its conversation_id)."""
+    from vigil.escalation.elevenlabs_call import capture_conversation_async
+
+    chart = _active()
+    capture_conversation_async(conversation_id, chart.name if chart else None)
+    return {"ok": True, "capturing": conversation_id}
+
+
 @app.get("/video")
 def video():
     def gen():
@@ -460,9 +527,10 @@ async def events(ws: WebSocket):
         while True:
             ev: BusEvent = await q.get()
             await ws.send_json(ev.model_dump())
-    except (WebSocketDisconnect, RuntimeError):
+    except (WebSocketDisconnect, RuntimeError, asyncio.CancelledError):
         # Uvicorn may surface a closed transport as RuntimeError when the page
-        # navigates away between queue delivery and send_json.
+        # navigates away between queue delivery and send_json. Server shutdown
+        # cancels an idle queue wait.
         pass
     finally:
         bus.unsubscribe(q)
@@ -479,6 +547,7 @@ def _patient_payload(chart: PatientChart) -> dict:
         "conditions": chart.active_conditions,
         "medications": chart.active_medications,
         "vitals": {k: f"{v.value:g}{v.unit}" for k, v in chart.latest_vitals.items()},
+        "avatar": _avatar_for(chart.patient_id),
     }
 
 
