@@ -71,6 +71,11 @@ class State:
     charts: dict[str, PatientChart] = {}
     active_id: str = ""
     stop = threading.Event()
+    pause = threading.Event()  # demo pause: freeze detection while the camera streams
+    # One-call-per-issue: an incident keeps the SAME issue_id while its signals keep
+    # re-firing; after nurse_issue_gap_s of quiet, the next hard event is a NEW issue.
+    issue_id: int = 0
+    last_hard_ts: float = 0.0
 
 
 state = State()
@@ -180,13 +185,43 @@ def _mirror(event: BusEvent) -> None:
 # --------------------------------------------------------------------------- #
 
 
+def _patient_name(pid: str) -> str | None:
+    chart = state.charts.get(pid)
+    return chart.name if chart else None
+
+
 def _on_perception(ev: PerceptionEvent) -> None:
     """Runs on the loop thread (scheduled via call_soon_threadsafe)."""
+    # Provisional fall signals are INSTANT UI feedback only: show the "validating…"
+    # countdown the moment a fall is seen, but never fuse/reason/page on them. The nurse
+    # is only paged once the fall validates into `fainted` (below).
+    if ev.kind in ("fall_detected", "fall_cleared"):
+        pid = state.active_id or _fallback_patient_id()
+        bus.publish(
+            BusEvent(
+                type="fall_validation",
+                payload={
+                    "state": "detected" if ev.kind == "fall_detected" else "cleared",
+                    "validate_s": float(ev.meta.get("validate_s", 0.0)),
+                    "patient": _patient_name(pid),
+                    "ts": ev.ts,
+                },
+            )
+        )
+        return
+
     bus.publish(BusEvent(type="perception", payload=ev.model_dump()))
-    if ev.kind in ("fall", "collapse", "seizure", "unresponsive", "chest_clutch", "scream"):
+    if ev.kind in ("fainted", "seizure", "scream"):
         pid = state.active_id or _fallback_patient_id()
         if pid:
             pstatus.mark_event(pid, ev.kind)
+        if ev.kind == "fainted":  # the validation completed → flip the banner to confirmed
+            bus.publish(
+                BusEvent(
+                    type="fall_validation",
+                    payload={"state": "confirmed", "patient": _patient_name(pid), "ts": ev.ts},
+                )
+            )
     fused = fuser.add(ev)
     if fused is not None:
         asyncio.create_task(handle_incident(fused))
@@ -211,6 +246,13 @@ async def handle_incident(fused: FusedEvent) -> None:
         state.active_id = pid
         bus.publish(BusEvent(type="patient", payload=_patient_payload(chart)))
         log.info("incident with no recognized face — bound to %s (fallback)", chart.name)
+
+    # One call per issue: keep the same issue_id while a single incident's signals keep
+    # re-firing; only start a new issue (which may page again) after a quiet gap.
+    now = time.time()
+    if now - state.last_hard_ts > settings.nurse_issue_gap_s:
+        state.issue_id += 1
+    state.last_hard_ts = now
 
     bus.publish(BusEvent(type="fused", payload=fused.model_dump()))
     bus.publish(
@@ -251,7 +293,7 @@ async def handle_incident(fused: FusedEvent) -> None:
         chart.to_context(),
     )
 
-    handler = NurseCallHandler(chart, bus=bus)
+    handler = NurseCallHandler(chart, bus=bus, issue_id=state.issue_id)
     actions = await asyncio.to_thread(run_ladder, decision, handler)
     for a in actions:
         bus.publish(BusEvent(type="escalation", payload=a.model_dump()))
@@ -303,12 +345,18 @@ def _start_vision(sink) -> None:
             source=source,
             status_sink=_vision_status,
             identify_sink=_vision_identify,
+            pause_event=state.pause,
         )
     except Exception as e:  # noqa: BLE001
         log.warning("vision disabled (%r) — install ML deps and connect a camera", e)
 
 
 def _start_audio(sink) -> None:
+    import os
+
+    if os.environ.get("VIGIL_DISABLE_AUDIO", "").lower() in ("1", "true", "yes"):
+        log.info("audio detection PAUSED (VIGIL_DISABLE_AUDIO set)")
+        return
     try:
         from vigil.perception.audio import run_audio
 
@@ -381,6 +429,18 @@ async def intake_page():
 @app.get("/health")
 async def health():
     return JSONResponse({"capabilities": _capabilities(), "active_patient": state.active_id})
+
+
+@app.post("/pause")
+async def pause_toggle():
+    """Demo pause: freeze detection (no events fire) while the camera keeps streaming."""
+    if state.pause.is_set():
+        state.pause.clear()
+    else:
+        state.pause.set()
+    paused = state.pause.is_set()
+    bus.publish(BusEvent(type="paused", payload={"paused": paused}))
+    return {"paused": paused}
 
 
 @app.get("/faces/{patient_id}.jpg")

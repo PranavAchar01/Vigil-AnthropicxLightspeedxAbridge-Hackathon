@@ -37,17 +37,17 @@ def build_cases():
     # HARD events on acute charts → must escalate to high acuity.
     add(
         charts.get("pranav") or charts_list[0],
-        _fused(["collapse"], Severity.HARD, "Collapse / faint — slumped then motionless"),
+        _fused(["fainted"], Severity.HARD, "Collapse / faint — slumped then motionless"),
         {"escalate": True, "max_esi": 2},
     )
     add(
         charts.get("sahiel") or charts_list[0],
-        _fused(["unresponsive"], Severity.HARD, "Unresponsive — prolonged motionlessness"),
+        _fused(["seizure"], Severity.HARD, "Unresponsive — prolonged motionlessness"),
         {"escalate": True, "max_esi": 2},
     )
     add(
         charts_list[0],
-        _fused(["scream", "fall"], Severity.HARD, "Fall detected — patient on the ground + scream"),
+        _fused(["scream", "fainted"], Severity.HARD, "Fall detected — patient on the ground + scream"),
         {"escalate": True, "max_esi": 2},
     )
     # SOFT event → monotonic, must not raise ESI number; a check-in is acceptable.

@@ -45,6 +45,13 @@ MODEL_ID = "MIT/ast-finetuned-audioset-10-10-0.4593"
 Sink = Callable[[PerceptionEvent], None]
 
 
+def _envf(name: str, default: float) -> float:
+    try:
+        return float(os.environ.get(name, default))
+    except (TypeError, ValueError):
+        return default
+
+
 class ASTBackend:
     """AST (AudioSet) distress classifier. score() -> P(distress) in [0, 1]."""
 
@@ -108,9 +115,52 @@ class HeuristicBackend:
         return loud * bright
 
 
+class LoudPitchBackend:
+    """Absolute-loudness (+ optional pitch) scream detector, tuned to ONE mic.
+
+    Use this when the AST model doesn't recognize a given user's screams (it labels
+    them 'Speech', scoring the distress classes ~0). Verified on-device: close-mic
+    screaming is ~5x louder than talk/ambient (RMS ~0.17 vs ~0.03), so an absolute
+    RMS ramp separates them cleanly. An optional spectral-centroid gate rejects loud
+    non-scream sounds. score() -> confidence in [0, 1]. Enable with VIGIL_SCREAM_MODE=loud.
+    """
+
+    THRESHOLD = 0.30
+
+    def __init__(self) -> None:
+        self._lo = _envf("VIGIL_SCREAM_RMS_LO", 0.06)  # RMS at/below -> 0 (below loud talk)
+        self._hi = _envf("VIGIL_SCREAM_RMS_HI", 0.16)  # RMS at/above -> 1 (solid scream)
+        self._cent_lo = _envf("VIGIL_SCREAM_CENT_LO", 0.0)  # Hz pitch gate; 0 = disabled
+
+    def _feats(self, window: np.ndarray) -> tuple[float, float]:
+        w = window.astype(np.float32)
+        rms = float(np.sqrt(np.mean(w * w)) + 1e-9)
+        mag = np.abs(np.fft.rfft(w * np.hanning(len(w))))
+        freqs = np.fft.rfftfreq(len(w), 1.0 / SAMPLE_RATE)
+        centroid = float((freqs * mag).sum() / (mag.sum() + 1e-9))
+        return rms, centroid
+
+    def score(self, window: np.ndarray) -> float:
+        rms, centroid = self._feats(window)
+        loud = float(np.clip((rms - self._lo) / (self._hi - self._lo + 1e-9), 0.0, 1.0))
+        if self._cent_lo > 0.0 and centroid < self._cent_lo:
+            loud *= 0.3  # loud but not bright enough to be a scream -> suppress
+        return loud
+
+    def score_verbose(self, window: np.ndarray) -> tuple[float, str, float]:
+        rms, centroid = self._feats(window)
+        s = self.score(window)
+        return s, f"loud(rms={rms:.3f} cent={centroid:.0f}Hz)", s
+
+
 def build_backend():
-    """AST is the real backend. Only fall back to the heuristic if it's explicitly
-    allowed; otherwise a missing model disables audio rather than false-firing."""
+    """AST is the default learned backend. VIGIL_SCREAM_MODE=loud forces the absolute
+    loudness backend (for mics where AST mislabels screams as speech). The old
+    adaptive heuristic remains as a last resort when AST fails to load."""
+    mode = os.environ.get("VIGIL_SCREAM_MODE", "ast").lower()
+    if mode == "loud":
+        print("[audio] loudness scream backend active (VIGIL_SCREAM_MODE=loud)")
+        return LoudPitchBackend()
     try:
         b = ASTBackend()
         print(f"[audio] AST AudioSet scream classifier ready (device={b._device})")

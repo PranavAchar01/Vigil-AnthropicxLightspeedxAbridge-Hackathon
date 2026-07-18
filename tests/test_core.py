@@ -38,13 +38,13 @@ def make_chart(esi: int = 3, conditions=None, meds=None) -> PatientChart:
 # --------------------------- fusion ---------------------------
 
 
-def test_scream_plus_fall_is_hard():
+def test_scream_plus_fainted_is_hard():
     f = EventFuser(window_s=4.0)
     f.add(PerceptionEvent(ts=100.0, modality=Modality.AUDIO, kind="scream", confidence=0.5))
-    fused = f.add(PerceptionEvent(ts=100.5, modality=Modality.VISION, kind="fall", confidence=0.9))
+    fused = f.add(PerceptionEvent(ts=100.5, modality=Modality.VISION, kind="fainted", confidence=0.9))
     assert fused is not None
     assert fused.severity == Severity.HARD
-    assert set(fused.kinds) == {"scream", "fall"}
+    assert set(fused.kinds) == {"scream", "fainted"}
 
 
 def test_quiet_scream_alone_is_soft():
@@ -53,9 +53,9 @@ def test_quiet_scream_alone_is_soft():
     assert fused is not None and fused.severity == Severity.SOFT
 
 
-def test_fall_alone_is_hard():
+def test_fainted_alone_is_hard():
     f = EventFuser(window_s=4.0)
-    fused = f.add(PerceptionEvent(ts=1.0, modality=Modality.VISION, kind="fall", confidence=0.8))
+    fused = f.add(PerceptionEvent(ts=1.0, modality=Modality.VISION, kind="fainted", confidence=0.8))
     assert fused is not None and fused.severity == Severity.HARD
 
 
@@ -117,6 +117,34 @@ def test_ladder_hold_does_nothing():
     actions = run_ladder(_decision(Action.HOLD, escalate=False), h)
     assert h.calls == []
     assert actions[0].kind == "none"
+
+
+# --------------------------- one call per issue ---------------------------
+
+
+def test_one_call_per_issue_gate():
+    from vigil.escalation import elevenlabs_call as ec
+
+    ec.reset_call_gate()
+    # first page for issue #1 is allowed
+    ok, _ = ec._reserve_call("+1", issue_id=1)
+    assert ok is True
+    # the SAME issue re-firing does NOT page again
+    ok, why = ec._reserve_call("+1", issue_id=1)
+    assert ok is False and "one call per issue" in why
+    # a DISTINCT later incident (new issue id) may page
+    ok, _ = ec._reserve_call("+1", issue_id=2)
+    assert ok is True
+
+
+def test_failed_call_releases_issue_for_retry():
+    from vigil.escalation import elevenlabs_call as ec
+
+    ec.reset_call_gate()
+    assert ec._reserve_call("+1", issue_id=7)[0] is True
+    ec._release_call("+1", issue_id=7)  # never actually dialed
+    # the same issue can try again after a release (so a transient failure isn't fatal)
+    assert ec._reserve_call("+1", issue_id=7)[0] is True
 
 
 # --------------------------- monotonic clamp ---------------------------
@@ -221,7 +249,7 @@ def test_live_status_snapshot_roundtrip():
 
     pid = "pt-live-1"
     ps.update_vision(pid, "on the floor", "still", moved=False)
-    ps.mark_event(pid, "fall")
+    ps.mark_event(pid, "fainted")
     ps.update_retriage(
         pid,
         new_esi=1,

@@ -104,43 +104,49 @@ def hold(gen_pose, seconds):
 # --------------------------------------------------------------------------- #
 
 
-def test_fall_off_chair():
-    frames = []
-    frames += [pose(320, 150 + (i % 2) * 3) for i in range(20)]  # ~1s upright
-    for i in range(11):  # ~0.5s rapid drop to the floor
+def test_fainted_requires_staying_down_5s():
+    # A fall that STAYS on the ground >= 5s -> fainted (the validated escalation).
+    frames = [pose(320, 150 + (i % 2) * 3) for i in range(20)]  # upright
+    for i in range(11):  # rapid drop to the floor
         frames.append(pose(320, 150 + 26 * i))
-    frames += hold(lambda: pose(320, 410), 0.6)  # landed low
-    assert "fall" in run(frames)
+    frames += hold(lambda: pose(320, 410), 6.5)  # on the ground > 5s
+    assert "fainted" in run(frames)
 
 
-def test_collapse_faint_in_place():
-    # slump the head below the shoulders (small vertical drop) then go still ~3s
+def test_fall_then_quick_recovery_no_page():
+    # Falls but gets back up within the 5s window -> NO page (trip-and-recover).
     frames = [pose(320, 150) for _ in range(10)]
-    for i in range(10):  # head rotates down to below shoulder line
-        frames.append(pose(320, 152, head_dy=-0.7 + 0.11 * i))
-    frames += hold(lambda: pose(320, 152, head_dy=0.4), 3.4)  # head_below + motionless
-    kinds = run(frames)
-    assert "collapse" in kinds
+    for i in range(11):  # fall
+        frames.append(pose(320, 150 + 26 * i))
+    frames += hold(lambda: pose(320, 410), 2.0)  # on the ground only 2s (< 5s)
+    frames += [pose(320 + (i % 2) * 45, 150) for i in range(40)]  # stand up + move clearly
+    assert "fainted" not in run(frames)
 
 
-def test_seizure_convulsion():
+def test_seated_head_drop_is_not_fainted():
+    # Leaning / dropping the head while seated must never read as a faint.
+    frames = [pose(320, 150) for _ in range(10)]
+    frames += hold(lambda: pose(320, 152, head_dy=0.4), 9.0)  # head below, seated, still
+    assert "fainted" not in run(frames)
+
+
+def test_seizure_needs_5s_sustained():
+    # >= 5s of sustained oscillation before it fires (validation).
     frames = [pose(320, 150) for _ in range(6)]
-    for i in range(44):  # ~2.2s of oscillatory shaking
+    for i in range(130):  # ~6.5s of oscillatory shaking
         sgn = -1 if i % 2 else 1
         frames.append(pose(320 + 15 * sgn, 150 + 8 * sgn))
     assert "seizure" in run(frames)
 
 
-def test_unresponsive_prolonged_stillness():
-    frames = hold(lambda: pose(320, 150), 11.0)  # dead still 11s
-    kinds = run(frames)
-    assert "unresponsive" in kinds
-    assert "motionless" in kinds  # the earlier soft signal fired too
-
-
-def test_chest_clutch_distress_gesture():
-    frames = hold(lambda: pose(320, 150, wrist="chest"), 2.2)  # hands at chest > gesture_s
-    assert "chest_clutch" in run(frames)
+def test_brief_shake_is_not_seizure():
+    # A short shake (< 5s) that stops must NOT page — validation.
+    frames = [pose(320, 150) for _ in range(6)]
+    for i in range(50):  # ~2.5s of shaking, then stops
+        sgn = -1 if i % 2 else 1
+        frames.append(pose(320 + 15 * sgn, 150 + 8 * sgn))
+    frames += [pose(320, 150) for _ in range(20)]
+    assert "seizure" not in run(frames)
 
 
 def test_slump_sustained_lean():
@@ -156,7 +162,7 @@ def test_normal_sitting_is_quiet():
         x += 5 if (i // 20) % 2 == 0 else -5  # slow triangle drift (few reversals)
         frames.append(pose(x, 150, wrist="side"))
     kinds = run(frames)
-    assert kinds.isdisjoint({"fall", "collapse", "seizure", "unresponsive"})
+    assert kinds.isdisjoint({"fainted", "seizure"})
 
 
 # --------------------------------------------------------------------------- #
@@ -174,24 +180,23 @@ def _fall_det():
     return d
 
 
-def test_fall_model_confirms_fall_then_collapse():
+def test_fall_model_fainted_when_still():
     d = _fall_det()
     box, ts = [200, 300, 360, 470], 100.0
-    for _ in range(120):  # 6s: a fallen box that stays put
+    for _ in range(120):  # 6s: a fallen box that stays put -> fainted (no immediate 'fall')
         d._update(0.85, box, 480.0, 640.0, ts)
         ts += DT
     kinds = {e.kind for e in d.emitted}
-    assert "fall" in kinds and "collapse" in kinds
+    assert "fainted" in kinds and "fall" not in kinds
 
 
-def test_fall_model_moving_is_fall_not_collapse():
+def test_fall_model_moving_is_not_fainted():
     d = _fall_det()
     ts = 100.0
-    for i in range(30):  # fallen but sliding across the frame (not still)
+    for i in range(30):  # fallen but sliding across the frame (not still) -> no page
         d._update(0.8, [200 + i * 8, 300, 360 + i * 8, 470], 480.0, 640.0, ts)
         ts += DT
-    kinds = {e.kind for e in d.emitted}
-    assert "fall" in kinds and "collapse" not in kinds
+    assert "fainted" not in {e.kind for e in d.emitted}
 
 
 def test_fall_model_no_detection_is_quiet():
@@ -248,7 +253,7 @@ def test_tremor_seizure_detector():
     mask = rng.random((300, 200)) < 0.08  # ~8% of box pixels -> tremor band
 
     ts = 100.0
-    for i in range(50):  # ~2.5s of sustained subtle motion in place
+    for i in range(130):  # ~6.5s (> seizure_tremor_s=5s) of sustained in-place motion
         fr = base.copy()
         if i % 2:
             fr[50:350, 50:250][mask] = 170

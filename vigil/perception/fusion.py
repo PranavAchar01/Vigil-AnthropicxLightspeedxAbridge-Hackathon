@@ -13,9 +13,9 @@ from collections import deque
 from vigil.events import FusedEvent, PerceptionEvent, PerceptionKind, Severity
 
 # Signals that, on their own, already warrant a hard (page-now) response.
-HARD_ALONE: set[PerceptionKind] = {"fall", "collapse", "seizure", "unresponsive"}
+HARD_ALONE: set[PerceptionKind] = {"fainted", "seizure"}
 # Signals that are ambiguous alone → voice check-in first.
-SOFT_ALONE: set[PerceptionKind] = {"motionless", "slump", "agitation", "chest_clutch"}
+SOFT_ALONE: set[PerceptionKind] = {"slump"}
 
 
 class EventFuser:
@@ -67,19 +67,14 @@ class EventFuser:
             self._buf.popleft()
 
     # priority order when several signals co-occur (drives the label picked)
-    _HARD_ORDER: tuple[PerceptionKind, ...] = ("fall", "seizure", "collapse", "unresponsive")
-    _SOFT_ORDER: tuple[PerceptionKind, ...] = ("chest_clutch", "slump", "motionless", "agitation")
+    _HARD_ORDER: tuple[PerceptionKind, ...] = ("fainted", "seizure")
+    _SOFT_ORDER: tuple[PerceptionKind, ...] = ("slump",)
     _HARD_LABEL = {
-        "fall": "Fall detected — patient on the ground",
-        "seizure": "Seizure — convulsive movement detected",
-        "collapse": "Collapse / faint — slumped then motionless",
-        "unresponsive": "Unresponsive — prolonged motionlessness",
+        "fainted": "Patient fainted — down 5s and not recovering",
+        "seizure": "Seizure — sustained convulsive movement",
     }
     _SOFT_LABEL = {
-        "chest_clutch": "Distress gesture — hand to chest / throat / head",
         "slump": "Posture degraded / slumping",
-        "motionless": "Prolonged motionlessness",
-        "agitation": "Agitation / restlessness",
     }
 
     def _classify(
