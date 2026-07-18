@@ -1,5 +1,5 @@
-import ClinicalDashboard from "./ClinicalDashboard";
+import { redirect } from "next/navigation";
 
 export default function ClinicalPage() {
-  return <ClinicalDashboard />;
+  redirect("/");
 }

@@ -452,7 +452,7 @@ export default function ClinicalDashboard() {
       <div className="ambient ambient-one" />
       <div className="ambient ambient-two" />
 
-      <DashboardNav current="clinical" />
+      <DashboardNav current="command" />
 
       <header className="topbar surface">
         <div className="brand-lockup">
