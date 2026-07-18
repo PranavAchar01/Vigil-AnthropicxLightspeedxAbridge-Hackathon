@@ -1,19 +1,39 @@
-"""Real-time fall + soft-signal detection from one webcam. Skeletons only (COCO-17).
+"""Real-time patient-distress detection from one webcam. Skeletons only (COCO-17).
 
-Adapted from the integration-research skeleton. The fall detector requires >=2 of
-3 posture votes (torso horizontal, wide bbox, head-below-hip) PLUS a sudden
-centroid drop PLUS a 2s time-on-ground confirm — that combination is what rejects
-a fast sit as a fall. Ultralytics + OpenCV are imported lazily so the server can
-boot in simulation mode without the heavy deps installed.
+Rebuilt for LAPTOP-WEBCAM framing (head + shoulders in view, hips usually NOT) and
+to cover every scenario a waiting-room patient might present, each as a distinct
+signal:
+
+    fall         rapid downward motion of head/shoulders → low/horizontal   (hard)
+    collapse     slump / head-drop, then goes motionless (faint / syncope)  (hard)
+    seizure      rapid oscillatory convulsion (many direction reversals)    (hard)
+    unresponsive prolonged stillness — loss of consciousness / passed out   (hard)
+    chest_clutch hands held to chest / throat / head (distress gesture)      (soft)
+    slump        sustained posture degradation                              (soft)
+    motionless   brief stillness — early soft signal                        (soft)
+
+Everything is measured relative to shoulder width (scale-invariant to distance) and
+frame height (position), so it works up close on a laptop cam. Detection does NOT
+require the hips or a ByteTrack id — it tracks the single most-prominent person.
+Every threshold is env-tunable (VIGIL_* below) and defaults are demo-sensitive.
+
+Live metrics are drawn on the video so you can see the detector responding in real
+time, and each fired event flashes on screen. Ultralytics + OpenCV import lazily.
 """
 
 from __future__ import annotations
 
 import math
+import os
 import time
-from collections import defaultdict, deque
+from collections import deque
 from dataclasses import dataclass, field
 from typing import Callable
+
+# macOS: we open the camera from a worker thread, but AVFoundation's auth request
+# must run on the main thread. Skip the in-app request and rely on the OS-level
+# camera grant (run scripts/grant_camera.py once to establish it).
+os.environ.setdefault("OPENCV_AVFOUNDATION_SKIP_AUTH", "1")
 
 import numpy as np
 
@@ -21,24 +41,54 @@ from vigil.events import Modality, PerceptionEvent
 
 # COCO-17 keypoint indices
 NOSE = 0
+L_EYE, R_EYE = 1, 2
+L_EAR, R_EAR = 3, 4
 L_SH, R_SH = 5, 6
+L_WR, R_WR = 9, 10
 L_HIP, R_HIP = 11, 12
-KP_CONF = 0.30
+UPPER_BODY = list(range(0, 11))  # nose..wrists — the reliably-framed keypoints
 
-# tunable thresholds
-TORSO_HORIZ_DEG = 60.0
-AR_WIDE = 1.0
-DROP_FRAC = 0.15
-DROP_WINDOW_S = 0.6
-GROUND_CONFIRM_S = 2.0
-POSTURE_DEBOUNCE = 3
-MOTIONLESS_EPS = 0.012
-SLUMP_DEG = 32.0
-SLUMP_S = 12.0
-COOLDOWN_S = 8.0
-# Faint/collapse: a person already down/slumped who goes still this long (research
-# COLLAPSE_MOTIONLESS state). Fast on purpose — this is the "fainted" signal.
-FAINT_SECONDS = 6.0
+
+def _f(name: str, default: float) -> float:
+    try:
+        return float(os.environ.get(name, default))
+    except (TypeError, ValueError):
+        return default
+
+
+@dataclass(frozen=True)
+class Params:
+    """All detector thresholds, env-overridable. Defaults are tuned demo-sensitive."""
+
+    kp_conf: float = _f("VIGIL_KP_CONF", 0.25)  # keypoint visibility floor
+    # fall
+    drop_frac: float = _f("VIGIL_DROP_FRAC", 0.11)  # downward drop of body-center (frac of H)
+    drop_window_s: float = _f("VIGIL_DROP_WINDOW_S", 0.8)
+    fall_confirm_s: float = _f("VIGIL_FALL_CONFIRM_S", 0.30)
+    torso_horiz_deg: float = _f("VIGIL_TORSO_HORIZ_DEG", 55.0)
+    ar_wide: float = _f("VIGIL_AR_WIDE", 1.05)  # bbox wider than tall
+    low_cy: float = _f("VIGIL_LOW_CY", 0.60)  # body-center in the lower part of frame
+    # motion / stillness (shoulder-widths per second)
+    still_motion: float = _f("VIGIL_STILL_MOTION", 0.55)
+    motionless_s: float = _f("VIGIL_MOTIONLESS_S", 3.0)  # soft — shows quickly
+    unresponsive_s: float = _f("VIGIL_UNRESPONSIVE_S", 8.0)  # hard
+    faint_s: float = _f("VIGIL_FAINT_S", 3.0)  # slump/down + still → collapse
+    # seizure
+    seizure_motion: float = _f("VIGIL_SEIZURE_MOTION", 2.2)  # mean motion in window
+    seizure_osc: float = _f("VIGIL_SEIZURE_OSC", 5)  # direction reversals in window
+    seizure_window_s: float = _f("VIGIL_SEIZURE_WINDOW_S", 1.6)
+    seizure_s: float = _f("VIGIL_SEIZURE_S", 1.0)  # sustained before firing
+    # gesture (hand to chest / throat / head)
+    gesture_s: float = _f("VIGIL_GESTURE_S", 1.5)
+    # slump
+    slump_min_deg: float = _f("VIGIL_SLUMP_MIN_DEG", 26.0)
+    slump_s: float = _f("VIGIL_SLUMP_S", 5.0)
+    # bookkeeping
+    cooldown_s: float = _f("VIGIL_COOLDOWN_S", 6.0)
+    unresponsive_cooldown_s: float = _f("VIGIL_UNRESPONSIVE_COOLDOWN_S", 15.0)
+
+
+P = Params()
 
 Sink = Callable[[PerceptionEvent], None]
 # (track_id, posture, motion_level, moved) — per-frame live status for the voice agent
@@ -46,13 +96,18 @@ StatusSink = Callable[[int, str, str, bool], None]
 
 
 def _mid(a, b):
-    return ((a[0] + b[0]) / 2.0, (a[1] + b[1]) / 2.0)
+    return (a + b) / 2.0
+
+
+def _dist(a, b) -> float:
+    return float(math.hypot(a[0] - b[0], a[1] - b[1]))
 
 
 def torso_angle_deg(kp) -> float | None:
     """Angle (deg) of the shoulder->hip torso vector from image vertical.
-    0 = upright, 90 = horizontal. Image y points DOWN."""
-    sh, hip = _mid(kp[L_SH], kp[R_SH]), _mid(kp[L_HIP], kp[R_HIP])
+    0 = upright, 90 = horizontal. Image y points DOWN. None if degenerate."""
+    sh = _mid(kp[L_SH], kp[R_SH])
+    hip = _mid(kp[L_HIP], kp[R_HIP])
     dx, dy = hip[0] - sh[0], hip[1] - sh[1]
     if abs(dx) < 1e-6 and abs(dy) < 1e-6:
         return None
@@ -60,16 +115,20 @@ def torso_angle_deg(kp) -> float | None:
 
 
 @dataclass
-class TrackState:
-    state: str = "upright"  # upright | on_ground | fallen
-    cy_hist: deque = field(default_factory=lambda: deque(maxlen=90))
+class PersonState:
+    fsm: str = "upright"  # upright | down
+    cy_hist: deque = field(default_factory=lambda: deque(maxlen=120))  # (t, cy)
+    delta_hist: deque = field(default_factory=lambda: deque(maxlen=120))  # (t, dx, dy) of sh_mid
     kp_prev: np.ndarray | None = None
-    ground_frames: int = 0
-    ground_since: float = 0.0
+    sh_prev: np.ndarray | None = None
+    t_prev: float = 0.0
+    fall_since: float = 0.0
     still_since: float = 0.0
-    slump_since: float = 0.0
     faint_since: float = 0.0
-    last_emit: dict = field(default_factory=lambda: defaultdict(float))
+    seizure_since: float = 0.0
+    gesture_since: float = 0.0
+    slump_since: float = 0.0
+    last_emit: dict = field(default_factory=dict)
 
 
 class VisionDetector:
@@ -79,6 +138,7 @@ class VisionDetector:
         device: str | None = None,
         emit: Sink = lambda e: None,
         emit_status: StatusSink = lambda *a: None,
+        params: "Params | None" = None,
     ) -> None:
         from ultralytics import YOLO  # lazy: heavy import
 
@@ -86,156 +146,386 @@ class VisionDetector:
         self.device = device
         self.emit = emit
         self.emit_status = emit_status
-        self.tracks: dict[int, TrackState] = {}
+        self.p = params or P  # tunable thresholds (the optimizer injects candidates here)
+        self.st = PersonState()
         self._last_status_ts = 0.0
+        self.metrics: dict = {}  # live values for the on-frame overlay
+        self.flash: tuple[str, float] | None = None  # (text, ts) of the last fired event
 
+    # ------------------------------------------------------------------ helpers
     def status_line(self) -> str:
-        states = [t.state for t in self.tracks.values()]
-        fallen = sum(s == "fallen" for s in states)
-        return f"people:{len(states)}  fallen:{fallen}"
+        m = self.metrics
+        return f"{self.st.fsm}  motion:{m.get('motion', 0):.1f}  drop:{m.get('drop', 0):.2f}"
 
-    def _fire(self, ts: float, kind, track_id: int, confidence: float) -> None:
-        tk = self.tracks[track_id]
-        if ts - tk.last_emit[kind] < COOLDOWN_S:
+    def _fire(self, ts: float, kind, conf: float, label: str) -> None:
+        cd = self.p.unresponsive_cooldown_s if kind == "unresponsive" else self.p.cooldown_s
+        if ts - self.st.last_emit.get(kind, -1e9) < cd:
             return
-        tk.last_emit[kind] = ts
+        self.st.last_emit[kind] = ts
+        self.flash = (label, ts)
         self.emit(
             PerceptionEvent(
                 ts=ts,
                 modality=Modality.VISION,
                 kind=kind,
-                confidence=round(float(confidence), 3),
-                track_id=int(track_id),
+                confidence=round(float(min(conf, 0.99)), 3),
+                track_id=1,
             )
         )
 
-    def _horizontal_posture(self, kp, box) -> tuple[bool, int]:
-        x1, y1, x2, y2 = box
-        w, h = (x2 - x1), (y2 - y1)
-        ar = w / max(h, 1e-6)
-        ang = torso_angle_deg(kp)
-        hip_y = _mid(kp[L_HIP], kp[R_HIP])[1]
-        head_below_hip = kp[NOSE][1] > hip_y + 0.02 * h
-        votes = int((ang is not None and ang >= TORSO_HORIZ_DEG) + (ar >= AR_WIDE) + head_below_hip)
-        return votes >= 2, votes
+    def _largest_person(self, res):
+        if res.keypoints is None or res.boxes is None or len(res.boxes) == 0:
+            return None
+        boxes = res.boxes.xyxy.cpu().numpy()
+        areas = (boxes[:, 2] - boxes[:, 0]) * (boxes[:, 3] - boxes[:, 1])
+        i = int(np.argmax(areas))
+        kxy = res.keypoints.xy.cpu().numpy()[i]
+        kconf = res.keypoints.conf
+        kc = kconf.cpu().numpy()[i] if kconf is not None else np.ones(len(kxy))
+        return boxes[i], kxy, kc
 
+    # ------------------------------------------------------------------- process
     def process(self, frame, ts: float):
         H = frame.shape[0]
-        res = self.model.track(
-            frame,
-            persist=True,
-            tracker="bytetrack.yaml",
-            imgsz=480,
-            conf=0.4,
-            device=self.device,
-            verbose=False,
-        )[0]
-        if res.boxes is None or res.boxes.id is None:
+        res = self.model.predict(frame, imgsz=512, conf=0.35, device=self.device, verbose=False)[0]
+
+        person = self._largest_person(res)
+        if person is None:
+            self.metrics = {"present": False}
+            self.st.kp_prev = None
+            self.st.sh_prev = None
             return res
-        ids = res.boxes.id.int().cpu().tolist()
-        boxes = res.boxes.xyxy.cpu().numpy()
-        kxy = res.keypoints.xy.cpu().numpy()
-        kconf = res.keypoints.conf.cpu().numpy()
-
-        for tid, box, kp, kc in zip(ids, boxes, kxy, kconf):
-            tk = self.tracks.setdefault(tid, TrackState())
-            visible = kc >= KP_CONF
-            if not (visible[L_SH] and visible[R_SH] and visible[L_HIP] and visible[R_HIP]):
-                continue
-
-            cy = _mid(_mid(kp[L_SH], kp[R_SH]), _mid(kp[L_HIP], kp[R_HIP]))[1] / H
-            tk.cy_hist.append((ts, cy))
-            drop = 0.0
-            for t0, cy0 in tk.cy_hist:
-                if ts - t0 <= DROP_WINDOW_S:
-                    drop = max(drop, cy - cy0)  # positive = downward in image
-            sudden_drop = drop >= DROP_FRAC
-
-            horiz, votes = self._horizontal_posture(kp, box)
-            ang = torso_angle_deg(kp) or 0.0
-
-            # fall state machine
-            if tk.state == "upright":
-                if sudden_drop and horiz:
-                    tk.ground_frames += 1
-                    if tk.ground_frames >= POSTURE_DEBOUNCE:
-                        tk.state, tk.ground_since = "on_ground", ts
-                else:
-                    tk.ground_frames = 0
-            elif tk.state == "on_ground":
-                if horiz:
-                    if ts - tk.ground_since >= GROUND_CONFIRM_S:
-                        conf = 0.6 + 0.2 * (votes >= 3) + 0.2 * sudden_drop
-                        self._fire(ts, "fall", tid, min(conf, 0.99))
-                        tk.state = "fallen"
-                else:
-                    tk.state, tk.ground_frames = "upright", 0
-            elif tk.state == "fallen":
-                if not horiz:
-                    tk.state, tk.ground_frames = "upright", 0
-
-            # soft signal: motionlessness (disp also drives the live motion level)
-            disp = 0.0
-            if tk.kp_prev is not None:
-                m = visible & (tk.kp_prev[:, 2] >= KP_CONF)
-                if m.any():
-                    disp = np.linalg.norm(kp[m] - tk.kp_prev[m, :2], axis=1).mean() / H
-                    if disp < MOTIONLESS_EPS:
-                        if tk.still_since == 0.0:
-                            tk.still_since = ts
-                        elif ts - tk.still_since >= _motionless_s():
-                            self._fire(ts, "motionless", tid, 0.7)
-                    else:
-                        tk.still_since = 0.0
-            tk.kp_prev = np.concatenate([kp, kc[:, None]], axis=1)
-
-            # soft signal: posture slump (sustained lean while upright)
-            slumping = False
-            if tk.state == "upright" and SLUMP_DEG <= ang < TORSO_HORIZ_DEG:
-                slumping = True
-                if tk.slump_since == 0.0:
-                    tk.slump_since = ts
-                elif ts - tk.slump_since >= SLUMP_S:
-                    self._fire(ts, "slump", tid, 0.6)
-            else:
-                tk.slump_since = 0.0
-
-            # collapse / faint: down or slumped AND motionless for FAINT_SECONDS
-            if (tk.state in ("on_ground", "fallen") or slumping) and disp < MOTIONLESS_EPS:
-                if tk.faint_since == 0.0:
-                    tk.faint_since = ts
-                elif ts - tk.faint_since >= FAINT_SECONDS:
-                    self._fire(ts, "collapse", tid, 0.85)
-            else:
-                tk.faint_since = 0.0
-
-            # live status for the voice agent (throttled ~2/sec)
-            if ts - self._last_status_ts >= 0.4:
-                self._last_status_ts = ts
-                posture = (
-                    "on the floor"
-                    if tk.state in ("on_ground", "fallen")
-                    else "slumped"
-                    if slumping
-                    else "upright"
-                )
-                moved = disp >= MOTIONLESS_EPS
-                motion = (
-                    "still"
-                    if disp < MOTIONLESS_EPS
-                    else "slight"
-                    if disp < 3 * MOTIONLESS_EPS
-                    else "active"
-                )
-                self.emit_status(tid, posture, motion, moved)
-
+        box, kp, kc = person
+        self.analyze(box, kp, kc, H, ts)
         return res
 
+    def analyze(self, box, kp, kc, H: float, ts: float) -> None:
+        """The detection core — pure keypoints in, events out. Split from `process`
+        so it can be driven by synthetic sequences in tests (no camera/model)."""
+        vis = kc >= self.p.kp_conf
 
-def _motionless_s() -> float:
-    from vigil.config import settings
+        # --- reference geometry (head + shoulders; hips optional) ---------------
+        x1, y1, x2, y2 = box
+        box_w, box_h = (x2 - x1), max(y2 - y1, 1.0)
+        ar = box_w / box_h
 
-    return settings.motionless_seconds
+        if vis[L_SH] and vis[R_SH]:
+            sh_mid = _mid(kp[L_SH], kp[R_SH])
+            scale = max(_dist(kp[L_SH], kp[R_SH]), 1.0)
+        else:  # shoulders occluded → fall back to the bbox so detection never stops
+            sh_mid = np.array([(x1 + x2) / 2.0, y1 + 0.22 * box_h])
+            scale = max(0.35 * box_w, 1.0)
+
+        # head: nose, else ears/eyes, else top-center of bbox
+        head = None
+        for idx in (NOSE, L_EAR, R_EAR, L_EYE, R_EYE):
+            if vis[idx]:
+                head = kp[idx]
+                break
+        if head is None:
+            head = np.array([(x1 + x2) / 2.0, y1])
+        head_below = head[1] > sh_mid[1] + 0.20 * scale  # head at/below shoulder line
+
+        hip_ok = vis[L_HIP] and vis[R_HIP]
+        torso_deg = torso_angle_deg(kp) if (hip_ok and vis[L_SH] and vis[R_SH]) else None
+
+        cy = sh_mid[1] / H
+
+        # --- first frame: seed and return --------------------------------------
+        if self.st.kp_prev is None or self.st.t_prev == 0.0:
+            self.st.kp_prev = np.concatenate([kp, kc[:, None]], axis=1)
+            self.st.sh_prev = sh_mid
+            self.st.t_prev = ts
+            self.st.cy_hist.append((ts, cy))
+            self.metrics = {"present": True, "motion": 0.0, "drop": 0.0}
+            return
+
+        dt = min(max(ts - self.st.t_prev, 1e-3), 0.5)
+
+        # --- motion (scale-invariant) ------------------------------------------
+        prev = self.st.kp_prev
+        m = vis & (prev[:, 2] >= self.p.kp_conf)
+        m_upper = m.copy()
+        m_upper[11:] = False  # ignore legs (rarely framed / noisy)
+        motion_px = (
+            float(np.linalg.norm(kp[m_upper] - prev[m_upper, :2], axis=1).mean())
+            if m_upper.any()
+            else 0.0
+        )
+        motion = motion_px / scale / dt  # shoulder-widths per second
+
+        d_sh = sh_mid - self.st.sh_prev
+        vy = (cy - (self.st.sh_prev[1] / H)) / dt  # + = downward
+        self.st.delta_hist.append((ts, float(d_sh[0]), float(d_sh[1])))
+        self.st.cy_hist.append((ts, cy))
+
+        # drop over the recent window (how far below the recent-highest position)
+        recent = [c for (t0, c) in self.st.cy_hist if ts - t0 <= self.p.drop_window_s]
+        drop = cy - min(recent) if recent else 0.0
+
+        # seizure: reversals of sh_mid direction + sustained high motion in window
+        win = [
+            (dx, dy) for (t0, dx, dy) in self.st.delta_hist if ts - t0 <= self.p.seizure_window_s
+        ]
+        reversals = 0
+        for a, b in zip(win, win[1:]):
+            if a[0] * b[0] + a[1] * b[1] < 0:  # dot < 0 → direction flipped >90°
+                reversals += 1
+        # mean motion across the seizure window, approximated by a per-frame motion EMA
+        self._motion_ema = 0.6 * getattr(self, "_motion_ema", motion) + 0.4 * motion
+        seizure_energy = self._motion_ema
+
+        still = motion < self.p.still_motion
+
+        # ---- posture recovery: clearly upright again → reset the "down" state ---
+        upright_now = (not head_below) and (torso_deg is None or torso_deg < 25.0) and cy < 0.55
+        if upright_now and motion >= self.p.still_motion:
+            self.st.fsm = "upright"
+
+        horiz = (
+            (torso_deg is not None and torso_deg >= self.p.torso_horiz_deg)
+            or ar >= self.p.ar_wide
+            or head_below
+        )
+        low = cy >= self.p.low_cy
+
+        # ============================ SCENARIO DETECTORS ========================
+        # 1) FALL — fast drop AND (horizontal OR ended up low)
+        if drop >= self.p.drop_frac and (horiz or low):
+            self.st.fall_since = self.st.fall_since or ts
+            if ts - self.st.fall_since >= self.p.fall_confirm_s:
+                conf = 0.65 + 0.2 * (drop >= 2 * self.p.drop_frac) + 0.15 * horiz
+                self._fire(ts, "fall", conf, "FALL DETECTED")
+                self.st.fsm = "down"
+        else:
+            self.st.fall_since = 0.0
+        # big sudden drop → fall immediately (fell straight down out of frame/chair)
+        if drop >= 2.4 * self.p.drop_frac and vy > 0.4:
+            self._fire(ts, "fall", 0.9, "FALL DETECTED")
+            self.st.fsm = "down"
+
+        # 2) SEIZURE — oscillatory shaking
+        if seizure_energy >= self.p.seizure_motion and reversals >= self.p.seizure_osc:
+            self.st.seizure_since = self.st.seizure_since or ts
+            if ts - self.st.seizure_since >= self.p.seizure_s:
+                self._fire(ts, "seizure", min(0.6 + 0.05 * reversals, 0.95), "SEIZURE DETECTED")
+        else:
+            self.st.seizure_since = 0.0
+
+        # 3) COLLAPSE / FAINT — down-ish posture that goes still
+        down_posture = (
+            head_below or horiz or self.st.fsm == "down" or drop >= 0.6 * self.p.drop_frac
+        )
+        if down_posture and still:
+            self.st.faint_since = self.st.faint_since or ts
+            if ts - self.st.faint_since >= self.p.faint_s:
+                self._fire(ts, "collapse", 0.85, "COLLAPSE / FAINT")
+                self.st.fsm = "down"
+        else:
+            self.st.faint_since = 0.0
+
+        # 4) MOTIONLESS (soft) → UNRESPONSIVE (hard) — prolonged stillness
+        if still:
+            self.st.still_since = self.st.still_since or ts
+            dur = ts - self.st.still_since
+            if dur >= self.p.unresponsive_s:
+                self._fire(ts, "unresponsive", 0.8, "UNRESPONSIVE")
+            elif dur >= self.p.motionless_s:
+                self._fire(ts, "motionless", 0.6, "motionless")
+        else:
+            self.st.still_since = 0.0
+
+        # 5) CHEST_CLUTCH — a wrist held near the center of chest / throat / head
+        clutch = False
+        top_y = min(head[1], sh_mid[1]) - 0.3 * scale
+        bot_y = sh_mid[1] + 1.3 * scale
+        for wr in (L_WR, R_WR):
+            if not vis[wr]:
+                continue
+            near_x = abs(kp[wr][0] - sh_mid[0]) < 0.7 * scale
+            in_core = top_y <= kp[wr][1] <= bot_y
+            if near_x and in_core:
+                clutch = True
+        if clutch:
+            self.st.gesture_since = self.st.gesture_since or ts
+            if ts - self.st.gesture_since >= self.p.gesture_s:
+                self._fire(ts, "chest_clutch", 0.6, "DISTRESS GESTURE")
+        else:
+            self.st.gesture_since = 0.0
+
+        # 6) SLUMP — sustained lean (upright but degraded posture)
+        if self.st.fsm == "upright":
+            slumping = (
+                torso_deg is not None and self.p.slump_min_deg <= torso_deg < self.p.torso_horiz_deg
+            ) or (torso_deg is None and abs(head[0] - sh_mid[0]) > 0.65 * scale)
+        else:
+            slumping = False
+        if slumping:
+            self.st.slump_since = self.st.slump_since or ts
+            if ts - self.st.slump_since >= self.p.slump_s:
+                self._fire(ts, "slump", 0.55, "slumping")
+        else:
+            self.st.slump_since = 0.0
+
+        # --- persist frame state -----------------------------------------------
+        self.st.kp_prev = np.concatenate([kp, kc[:, None]], axis=1)
+        self.st.sh_prev = sh_mid
+        self.st.t_prev = ts
+
+        # --- live metrics + status ---------------------------------------------
+        posture = (
+            "on the floor"
+            if self.st.fsm == "down"
+            else "clutching chest"
+            if clutch
+            else "slumped"
+            if slumping
+            else "upright"
+        )
+        motion_label = (
+            "still" if still else "slight" if motion < 3 * self.p.still_motion else "active"
+        )
+        self.metrics = {
+            "present": True,
+            "state": self.st.fsm,
+            "motion": round(motion, 2),
+            "drop": round(float(drop), 3),
+            "vy": round(float(vy), 2),
+            "reversals": reversals,
+            "still_s": round(ts - self.st.still_since, 1) if self.st.still_since else 0.0,
+            "posture": posture,
+            "head_below": bool(head_below),
+        }
+        if ts - self._last_status_ts >= 0.4:
+            self._last_status_ts = ts
+            self.emit_status(1, posture, motion_label, not still)
+
+    # ------------------------------------------------------------------- overlay
+    def draw(self, frame, cv2) -> None:
+        """Render the live metric panel + last-event flash onto the annotated frame."""
+        m = self.metrics
+        H, W = frame.shape[0], frame.shape[1]
+        panel = (
+            [
+                f"STATE   {m.get('state', '—')}",
+                f"motion  {m.get('motion', 0):.2f} sw/s  ({m.get('posture', '—')})",
+                f"drop    {m.get('drop', 0):.2f}   vy {m.get('vy', 0):+.2f}",
+                f"seizure reversals {m.get('reversals', 0)}",
+                f"still   {m.get('still_s', 0):.1f}s",
+            ]
+            if m.get("present")
+            else ["no person in frame"]
+        )
+        y = 46
+        cv2.rectangle(frame, (8, 30), (330, 30 + 22 * len(panel) + 10), (0, 0, 0), -1)
+        for line in panel:
+            cv2.putText(frame, line, (16, y), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (120, 255, 170), 1)
+            y += 22
+        # event flash (persist ~2.5s)
+        if self.flash and time.time() - self.flash[1] < 2.5:
+            txt = self.flash[0]
+            (tw, th), _ = cv2.getTextSize(txt, cv2.FONT_HERSHEY_SIMPLEX, 1.1, 3)
+            x = (W - tw) // 2
+            cv2.rectangle(frame, (x - 16, H - 90), (x + tw + 16, H - 40), (0, 0, 0), -1)
+            cv2.putText(frame, txt, (x, H - 55), cv2.FONT_HERSHEY_SIMPLEX, 1.1, (80, 90, 255), 3)
+
+
+class FallModelDetector:
+    """A dedicated, pre-trained fall-detection YOLO running ALONGSIDE the pose FSM
+    for redundant fall/faint coverage.
+
+    Model: melihuzunoglu/human-fall-detection (YOLOv11, classes fallen/sitting/
+    standing), fine-tuned specifically for falls. A confirmed 'fallen' box → `fall`;
+    a fallen box whose centroid then stays put → `collapse` (fainted on the ground).
+    Either this OR the pose FSM firing is enough — fusion de-dups on cooldown.
+    """
+
+    def __init__(self, model_path, emit: Sink = lambda e: None, device: str | None = None) -> None:
+        from ultralytics import YOLO  # lazy heavy import
+
+        self.model = YOLO(model_path)
+        self.device = device
+        self.emit = emit
+        self.names = {int(i): str(n).lower() for i, n in self.model.names.items()}
+        self.fallen_ids = {i for i, n in self.names.items() if "fall" in n}
+        self.conf = _f("VIGIL_FALL_MODEL_CONF", 0.40)
+        self.confirm_s = _f("VIGIL_FALL_CONFIRM_S", 0.40)
+        self.faint_s = _f("VIGIL_FALL_FAINT_S", 3.0)
+        self.still_frac = _f("VIGIL_FALL_STILL_FRAC", 0.03)
+        self.cooldown_s = _f("VIGIL_FALL_COOLDOWN_S", 6.0)
+        self.fallen_since = 0.0
+        self.still_since = 0.0
+        self.center_prev: np.ndarray | None = None
+        self.last_emit: dict = {}
+        self.last: dict = {"fallen": False, "conf": 0.0, "box": None}
+
+    def _fire(self, ts: float, kind, conf: float) -> None:
+        if ts - self.last_emit.get(kind, -1e9) < self.cooldown_s:
+            return
+        self.last_emit[kind] = ts
+        self.emit(
+            PerceptionEvent(
+                ts=ts,
+                modality=Modality.VISION,
+                kind=kind,
+                confidence=round(float(min(conf, 0.99)), 3),
+                track_id=2,
+            )
+        )
+
+    def _update(self, best_conf: float | None, box, H: float, W: float, ts: float) -> None:
+        """Confirm/faint state machine — pure, so tests can drive it without the model."""
+        if best_conf is None:
+            self.fallen_since = self.still_since = 0.0
+            self.center_prev = None
+            self.last = {"fallen": False, "conf": 0.0, "box": None}
+            return
+        self.fallen_since = self.fallen_since or ts
+        if ts - self.fallen_since >= self.confirm_s:
+            self._fire(ts, "fall", best_conf)
+        center = np.array([(box[0] + box[2]) / 2.0 / W, (box[1] + box[3]) / 2.0 / H])
+        if self.center_prev is not None:
+            if float(np.linalg.norm(center - self.center_prev)) < self.still_frac:
+                self.still_since = self.still_since or ts
+                if ts - self.still_since >= self.faint_s:
+                    self._fire(ts, "collapse", min(best_conf + 0.1, 0.99))
+            else:
+                self.still_since = 0.0
+        self.center_prev = center
+        self.last = {"fallen": True, "conf": round(best_conf, 2), "box": box}
+
+    def process(self, frame, ts: float):
+        H, W = frame.shape[0], frame.shape[1]
+        res = self.model.predict(
+            frame, imgsz=640, conf=self.conf, device=self.device, verbose=False
+        )[0]
+        best_conf, best_box = None, None
+        if res.boxes is not None and len(res.boxes):
+            cls = res.boxes.cls.cpu().numpy().astype(int)
+            cf = res.boxes.conf.cpu().numpy()
+            xy = res.boxes.xyxy.cpu().numpy()
+            for c, k, b in zip(cls, cf, xy):
+                if c in self.fallen_ids and (best_conf is None or k > best_conf):
+                    best_conf, best_box = float(k), b
+        self._update(best_conf, best_box, H, W, ts)
+        return res
+
+    def draw(self, frame, cv2) -> None:
+        if not self.last.get("fallen"):
+            return
+        b = self.last.get("box")
+        if b is not None:
+            p1, p2 = (int(b[0]), int(b[1])), (int(b[2]), int(b[3]))
+            cv2.rectangle(frame, p1, p2, (60, 60, 255), 3)
+        cv2.putText(
+            frame,
+            f"FALL MODEL: FALLEN {self.last['conf']:.2f}",
+            (12, frame.shape[0] - 16),
+            cv2.FONT_HERSHEY_SIMPLEX,
+            0.7,
+            (60, 60, 255),
+            2,
+        )
 
 
 def run_vision(
@@ -248,17 +538,32 @@ def run_vision(
     status_sink: StatusSink = lambda *a: None,
     identify_sink=lambda pid, name, score: None,
 ) -> None:
-    """Blocking capture loop; run in a daemon thread. Encodes annotated frames
-    into `frame_buffer`, publishes PerceptionEvents through `sink`, per-frame live
-    status through `status_sink`, and (if a face gallery is enrolled) the identified
-    patient through `identify_sink`."""
+    """Blocking capture loop; run in a daemon thread. Encodes annotated frames into
+    `frame_buffer`, publishes PerceptionEvents through `sink`, per-frame live status
+    through `status_sink`, and (if a face gallery is enrolled) the identified patient
+    through `identify_sink`."""
     import cv2
 
     det = VisionDetector(model_path=model_path, device=device, emit=sink, emit_status=status_sink)
 
+    from vigil.config import settings
+
+    # Dedicated pre-trained fall-detection model (redundant fall/faint coverage).
+    fall_det = None
+    fall_every_n = max(1, int(_f("VIGIL_FALL_EVERY_N", 1)))
+    if settings.fall_model_path.exists():
+        try:
+            fall_det = FallModelDetector(str(settings.fall_model_path), emit=sink, device=device)
+            print(
+                f"[vision] fall-detection model loaded ({settings.fall_model_path.name}; "
+                f"classes {list(fall_det.names.values())})"
+            )
+        except Exception as e:  # noqa: BLE001 — never let it break the pose feed
+            print(f"[vision] fall model unavailable ({e!r}); pose FSM covers falls")
+            fall_det = None
+
     # optional on-device face recognition -> which patient is on camera
     recognizer, gallery, last_pid, frame_i = None, None, None, 0
-    from vigil.config import settings
 
     if settings.face_gallery_path.exists():
         try:
@@ -275,7 +580,7 @@ def run_vision(
     if not cap.isOpened():
         print(f"[vision] could not open camera source={source}; vision disabled")
         return
-    print("[vision] camera open; detecting falls (skeletons only)")
+    print("[vision] camera open; detecting distress (skeletons only)")
     try:
         while not stop_event.is_set() and cap.isOpened():
             ok, frame = cap.read()
@@ -294,14 +599,23 @@ def run_vision(
                 except Exception:  # noqa: BLE001 — recognition must never break the feed
                     pass
 
-            res = det.process(frame, ts=time.time())
+            ts = time.time()
+            res = det.process(frame, ts=ts)
+            if fall_det is not None and frame_i % fall_every_n == 0:
+                try:
+                    fall_det.process(frame, ts=ts)
+                except Exception:  # noqa: BLE001 — never let it break the feed
+                    pass
             annotated = res.plot() if res is not None else frame
+            det.draw(annotated, cv2)
+            if fall_det is not None:
+                fall_det.draw(annotated, cv2)
             cv2.putText(
                 annotated,
                 f"VIGIL  {det.status_line()}",
-                (12, 28),
+                (12, 24),
                 cv2.FONT_HERSHEY_SIMPLEX,
-                0.7,
+                0.6,
                 (0, 255, 120),
                 2,
             )

@@ -67,6 +67,28 @@ def _ensure_worker() -> None:
             _worker_started = True
 
 
+def set_backend_url(url: str) -> None:
+    """Publish this backend's current public URL to the vigil_runtime rendezvous row
+    (id='backend') so the public Vercel page discovers it at load time. Upsert on id;
+    synchronous (called once at startup, not in a hot path)."""
+    if not configured() or not url:
+        return
+    from datetime import datetime, timezone
+
+    row = {"id": "backend", "url": url, "updated_at": datetime.now(timezone.utc).isoformat()}
+    req = urllib.request.Request(
+        f"{settings.supabase_url}/rest/v1/vigil_runtime?on_conflict=id",
+        data=json.dumps(row).encode(),
+        method="POST",
+        headers={**_headers(), "Prefer": "resolution=merge-duplicates,return=minimal"},
+    )
+    try:
+        urllib.request.urlopen(req, timeout=10).read()
+        log.info("published backend url to Supabase: %s", url)
+    except Exception as e:  # noqa: BLE001
+        log.warning("could not publish backend url: %r", e)
+
+
 def log_event(
     type: str,
     *,

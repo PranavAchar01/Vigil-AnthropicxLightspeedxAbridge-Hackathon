@@ -2,9 +2,12 @@
 
 import { useEffect, useRef, useState } from "react";
 import BackendFeed from "./BackendFeed";
+import { supabase } from "./lib/supabase";
 
-const BACKEND =
-  process.env.NEXT_PUBLIC_VIGIL_URL || "https://mask-scoop-debate-devoted.trycloudflare.com";
+// The backend runs on a laptop behind an ephemeral tunnel. It publishes its current
+// public URL to Supabase (vigil_runtime); the page resolves it at load time and
+// reconnects if it changes. NEXT_PUBLIC_VIGIL_URL is an optional static fallback.
+const FALLBACK_BACKEND = process.env.NEXT_PUBLIC_VIGIL_URL || "";
 const SUPABASE_URL = process.env.NEXT_PUBLIC_SUPABASE_URL || "";
 
 type Line = { id: number; cls: string; text: string };
@@ -12,7 +15,7 @@ type Caps = Record<string, boolean>;
 type Patient = {
   name: string; age?: number; gender?: string; visit?: string;
   baseline_esi?: number; conditions?: string[]; medications?: string[];
-  vitals?: Record<string, string>;
+  vitals?: Record<string, string>; avatar?: string | null;
 };
 
 const EyeIcon = () => (
@@ -47,6 +50,7 @@ export default function Home() {
   const [logItems, setLogItems] = useState<string[]>([]);
   const [note, setNote] = useState<{ text: string; bundle?: string } | null>(null);
   const [camOk, setCamOk] = useState(false);
+  const [backend, setBackend] = useState<string>(FALLBACK_BACKEND);
 
   const idRef = useRef(1);
   const deltaRef = useRef<number | null>(null);
@@ -57,8 +61,38 @@ export default function Home() {
     traceEnd.current?.scrollIntoView({ block: "end" });
   }, [lines]);
 
+  // Resolve the backend's current public URL from Supabase, and follow changes so a
+  // tunnel restart reconnects the page with no redeploy.
   useEffect(() => {
-    const wsUrl = BACKEND.replace(/^http/, "ws") + "/events";
+    const sb = supabase;
+    if (!sb) return;
+    let active = true;
+    const apply = (url?: string | null) => {
+      if (active && typeof url === "string" && url) setBackend(url);
+    };
+    sb.from("vigil_runtime")
+      .select("url")
+      .eq("id", "backend")
+      .maybeSingle()
+      .then(({ data }) => apply((data as { url?: string } | null)?.url));
+    const ch = sb
+      .channel("vigil_runtime_backend")
+      .on(
+        "postgres_changes",
+        { event: "*", schema: "public", table: "vigil_runtime", filter: "id=eq.backend" },
+        (p) => apply((p.new as { url?: string }).url)
+      )
+      .subscribe();
+    return () => {
+      active = false;
+      sb.removeChannel(ch);
+    };
+  }, []);
+
+  useEffect(() => {
+    if (!backend) return;
+    setCamOk(false);
+    const wsUrl = backend.replace(/^http/, "ws") + "/events";
     let ws: WebSocket | null = null;
     let closed = false;
 
@@ -160,7 +194,7 @@ export default function Home() {
     };
     connect();
     return () => { closed = true; ws?.close(); };
-  }, []);
+  }, [backend]);
 
   const setCap = (k: string) => (caps[k] ? "cap on" : "cap");
 
@@ -171,7 +205,7 @@ export default function Home() {
         <span className="brand-name">Vigil</span>
         <span className="sub">command center · continuous re-triage · skeletons only</span>
         <span className="spacer" />
-        <span className="backend">backend: {BACKEND.replace(/^https?:\/\//, "")}</span>
+        <span className="backend">backend: {backend ? backend.replace(/^https?:\/\//, "") : "resolving…"}</span>
         <span className={`conn glass-sub ${conn === "live" ? "live" : conn === "down" ? "down" : ""}`}>
           <span className="dot" />
           {conn === "live" ? "Live" : conn === "down" ? "Backend offline" : "Connecting…"}
@@ -184,18 +218,28 @@ export default function Home() {
           <div className="phead"><span className="glass-icon"><VideoIcon /></span><span className="ptitle">Live skeleton view</span></div>
           <div className="videoframe glass-sub">
             {/* eslint-disable-next-line @next/next/no-img-element */}
-            <img src={`${BACKEND}/video`} alt="" onLoad={(e) => { if ((e.target as HTMLImageElement).naturalWidth) setCamOk(true); }} onError={() => setCamOk(false)} style={{ display: camOk ? "block" : "none" }} />
+            {backend && (
+              <img src={`${backend}/video`} alt="" onLoad={(e) => { if ((e.target as HTMLImageElement).naturalWidth) setCamOk(true); }} onError={() => setCamOk(false)} style={{ display: camOk ? "block" : "none" }} />
+            )}
             {!camOk && (
               <div className="cam-standby">
                 <span className="glass-icon lg"><VideoIcon /></span>
-                <span>Camera standby</span>
+                <span>{backend ? "Camera standby" : "Waiting for backend…"}</span>
               </div>
             )}
           </div>
           <div className="card glass-sub">
-            <div className="row"><span className="k">Patient</span><span className="v">{patient ? `${patient.name} · ${patient.age ?? "?"} · ${patient.gender ?? ""}` : "—"}</span></div>
-            <div className="row"><span className="k">Visit</span><span className="v">{patient?.visit ?? "—"}</span></div>
-            <div className="row"><span className="k">Baseline</span><span className="v">{patient ? <span className="esi-badge glass-sub">ESI {patient.baseline_esi}</span> : "—"}</span></div>
+            <div className="pheadrow">
+              {patient?.avatar ? (
+                // eslint-disable-next-line @next/next/no-img-element
+                <img className="avatar" alt="" src={`${backend}${patient.avatar}`} />
+              ) : null}
+              <div className="pmeta">
+                <div className="pname">{patient ? `${patient.name} · ${patient.age ?? "?"} · ${patient.gender ?? ""}` : "Awaiting patient recognition"}</div>
+                <div className="pvisit">{patient ? (patient.visit ?? "") : "Step in front of the camera to identify a patient"}</div>
+              </div>
+              {patient ? <span className="esi-badge glass-sub">ESI {patient.baseline_esi}</span> : null}
+            </div>
             <div className="row"><span className="k">Vitals</span><span className="v">{patient?.vitals ? Object.entries(patient.vitals).map(([k, v]) => `${k} ${v}`).join(" · ") : "—"}</span></div>
             <div className="label">Active conditions</div>
             <div className="chips">{(patient?.conditions ?? ["—"]).slice(0, 8).map((c, i) => <span key={i} className="chip">{c}</span>)}</div>

@@ -82,6 +82,11 @@ body::before {
 .chips { display: flex; flex-wrap: wrap; gap: 7px; }
 .chip { border-radius: 999px; padding: 4px 11px; font-size: 12px; color: var(--t2); background: var(--glass); border: 1px solid var(--hair); }
 .esi-badge { display: inline-flex; align-items: center; gap: 6px; padding: 4px 12px; border-radius: 999px; font-size: 13px; color: var(--t1); }
+.pheadrow { display: flex; align-items: center; gap: 12px; padding-bottom: 10px; border-bottom: 1px solid var(--hair-soft); margin-bottom: 6px; }
+.avatar { width: 52px; height: 52px; border-radius: 50%; object-fit: cover; flex: 0 0 auto; border: 1px solid var(--hair); box-shadow: 0 4px 14px rgba(0,0,0,.5), inset 0 1px 0 rgba(255,255,255,.15); }
+.pmeta { flex: 1; min-width: 0; }
+.pname { font-size: 15px; color: var(--t1); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.pvisit { font-size: 12px; color: var(--t2); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; margin-top: 2px; }
 .trace { flex: 1; overflow-y: auto; font: 13.5px/1.7 var(--mono); white-space: pre-wrap; padding-right: 6px; }
 .line { margin: 3px 0; }
 .faint { color: var(--t3); } .sysc { color: var(--t2); } .reason { color: var(--t1); } .signal { color: var(--signal); }

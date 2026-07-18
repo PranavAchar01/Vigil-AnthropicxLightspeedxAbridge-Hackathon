@@ -84,6 +84,12 @@
   .chip{border-radius:999px;padding:4px 11px;font-size:12px;color:var(--t2);
     background:var(--glass);border:1px solid var(--hair);backdrop-filter:blur(12px)}
   .esi-badge{display:inline-flex;align-items:center;gap:6px;padding:4px 12px;border-radius:999px;font-size:13px;color:var(--t1)}
+  .pheadrow{display:flex;align-items:center;gap:12px;padding-bottom:10px;border-bottom:1px solid var(--hair-soft);margin-bottom:6px}
+  .avatar{width:52px;height:52px;border-radius:50%;object-fit:cover;flex:0 0 auto;display:none;
+    border:1px solid var(--hair);box-shadow:0 4px 14px rgba(0,0,0,.5),inset 0 1px 0 rgba(255,255,255,.15)}
+  .pmeta{flex:1;min-width:0}
+  .pname{font-size:15px;color:var(--t1);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+  .pvisit{font-size:12px;color:var(--t2);white-space:nowrap;overflow:hidden;text-overflow:ellipsis;margin-top:2px}
 
   #trace{flex:1;overflow-y:auto;font:13.5px/1.7 var(--mono);white-space:pre-wrap;padding-right:6px}
   .line{margin:3px 0}
@@ -151,9 +157,14 @@
       </div>
     </div>
     <div class="card glass-sub">
-      <div class="row"><span class="k">Patient</span><span class="v" id="p-name">—</span></div>
-      <div class="row"><span class="k">Visit</span><span class="v" id="p-visit">—</span></div>
-      <div class="row"><span class="k">Baseline</span><span class="v" id="p-esi">—</span></div>
+      <div class="pheadrow">
+        <img id="p-avatar" class="avatar" alt="" />
+        <div class="pmeta">
+          <div class="pname" id="p-name">Awaiting patient recognition</div>
+          <div class="pvisit" id="p-visit">Step in front of the camera to identify a patient</div>
+        </div>
+        <span class="esi-badge glass-sub" id="p-esi" style="display:none"></span>
+      </div>
       <div class="row"><span class="k">Vitals</span><span class="v" id="p-vitals">—</span></div>
       <div class="label">Active conditions</div>
       <div class="chips" id="p-conds"></div>
@@ -219,9 +230,12 @@ function chips(el,items){
   if(!(items||[]).length){const c=document.createElement("span");c.className="chip";c.textContent="—";el.appendChild(c);}
 }
 function setPatient(p){
+  const av=$("p-avatar");
+  if(p.avatar){ av.src=p.avatar; av.onerror=()=>av.style.display="none"; av.style.display="block"; }
+  else av.style.display="none";
   $("p-name").textContent=`${p.name} · ${p.age??"?"} · ${p.gender??""}`;
-  $("p-visit").textContent=p.visit||"—";
-  $("p-esi").innerHTML=`<span class="esi-badge glass-sub">ESI ${p.baseline_esi}</span>`;
+  $("p-visit").textContent=p.visit||"";
+  const esi=$("p-esi"); esi.style.display="inline-flex"; esi.textContent=`ESI ${p.baseline_esi}`;
   $("p-vitals").textContent=Object.entries(p.vitals||{}).map(([k,v])=>`${k} ${v}`).join(" · ")||"—";
   chips($("p-conds"),p.conditions); chips($("p-meds"),p.medications);
 }

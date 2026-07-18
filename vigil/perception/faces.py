@@ -27,33 +27,44 @@ class FaceGallery:
 
     def __init__(self, threshold: float = 0.45) -> None:
         self.threshold = threshold
-        self.entries: list[tuple[str, str, np.ndarray]] = []  # (patient_id, name, embedding)
+        # (patient_id, name, embedding, image_filename)
+        self.entries: list[tuple[str, str, np.ndarray, str]] = []
 
-    def add(self, patient_id: str, name: str, embedding) -> None:
-        self.entries.append((patient_id, name, np.asarray(embedding, dtype=float)))
+    def add(self, patient_id: str, name: str, embedding, image: str = "") -> None:
+        self.entries.append((patient_id, name, np.asarray(embedding, dtype=float), image))
 
     def identify(self, embedding) -> tuple[str, str, float] | None:
         """Return (patient_id, name, score) for the closest enrolled face, or None."""
         if not self.entries:
             return None
         emb = np.asarray(embedding, dtype=float)
-        pid, name, best = max(self.entries, key=lambda e: cosine(emb, e[2]))
-        score = cosine(emb, best)
-        return (pid, name, score) if score >= self.threshold else None
+        e = max(self.entries, key=lambda x: cosine(emb, x[2]))
+        score = cosine(emb, e[2])
+        return (e[0], e[1], score) if score >= self.threshold else None
+
+    def image_for(self, patient_id: str) -> str | None:
+        """The enrolled image filename for a patient (for avatar display)."""
+        for pid, _name, _emb, image in self.entries:
+            if pid == patient_id and image:
+                return image
+        return None
 
     def __len__(self) -> int:
         return len(self.entries)
 
     def to_json(self) -> str:
         return json.dumps(
-            [{"patient_id": p, "name": n, "embedding": e.tolist()} for p, n, e in self.entries]
+            [
+                {"patient_id": p, "name": n, "embedding": e.tolist(), "image": img}
+                for p, n, e, img in self.entries
+            ]
         )
 
     @classmethod
     def load(cls, path: str | Path, threshold: float = 0.45) -> "FaceGallery":
         g = cls(threshold)
         for row in json.loads(Path(path).read_text()):
-            g.add(row["patient_id"], row.get("name", ""), row["embedding"])
+            g.add(row["patient_id"], row.get("name", ""), row["embedding"], row.get("image", ""))
         return g
 
 

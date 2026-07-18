@@ -52,7 +52,9 @@ FONTS = DASHBOARD_DIR / "fonts.css"
 
 bus = EventBus()
 frames = FrameBuffer()
-fuser = EventFuser(window_s=settings.fusion_window_seconds)
+fuser = EventFuser(
+    window_s=settings.fusion_window_seconds, cooldown_s=settings.fusion_cooldown_seconds
+)
 
 
 class State:
@@ -72,19 +74,44 @@ def _load_cohort() -> None:
         return
     charts = load_cohort(settings.cohort_path)
     state.charts = {c.patient_id: c for c in charts}
-    hero = next(
-        (c for c in charts if "covid" in c.visit_title.lower()), charts[0] if charts else None
-    )
-    state.active_id = hero.patient_id if hero else ""
-    log.info(
-        "loaded %d patients; active = %s",
-        len(charts),
-        state.charts.get(state.active_id, PatientChart("", "", "?", "", None, "")).name,
-    )
+    # No patient is shown until the camera RECOGNIZES a face (face -> active -> chart).
+    state.active_id = ""
+    log.info("loaded %d patients; awaiting face recognition to bind a chart", len(charts))
 
 
 def _active() -> PatientChart | None:
     return state.charts.get(state.active_id)
+
+
+def _fallback_patient_id() -> str:
+    """When a distress signal fires before a face is recognized, bind it to a patient
+    anyway (first in the cohort) so the incident still shows. Face recognition, when it
+    lands, overrides this via state.active_id."""
+    return next(iter(state.charts), "")
+
+
+class _Gallery:
+    gallery = None
+    loaded = False
+
+
+def _face_gallery():
+    """Lazy-load the enrolled face gallery once (for avatar lookup); None if absent."""
+    if not _Gallery.loaded:
+        _Gallery.loaded = True
+        if settings.face_gallery_path.exists():
+            try:
+                from vigil.perception.faces import FaceGallery
+
+                _Gallery.gallery = FaceGallery.load(settings.face_gallery_path)
+            except Exception:  # noqa: BLE001
+                _Gallery.gallery = None
+    return _Gallery.gallery
+
+
+def _avatar_for(patient_id: str) -> str | None:
+    g = _face_gallery()
+    return f"/faces/{patient_id}.jpg" if (g and g.image_for(patient_id)) else None
 
 
 def _capabilities() -> dict[str, bool]:
@@ -94,6 +121,7 @@ def _capabilities() -> dict[str, bool]:
         "patient_checkin": checkin_configured(),
         "cohort_loaded": bool(state.charts),
         "backend": supa.configured(),
+        "fall_model": settings.fall_model_path.exists(),
     }
 
 
@@ -137,8 +165,10 @@ def _mirror(event: BusEvent) -> None:
 def _on_perception(ev: PerceptionEvent) -> None:
     """Runs on the loop thread (scheduled via call_soon_threadsafe)."""
     bus.publish(BusEvent(type="perception", payload=ev.model_dump()))
-    if ev.kind in ("fall", "collapse", "scream") and state.active_id:
-        pstatus.mark_event(state.active_id, ev.kind)
+    if ev.kind in ("fall", "collapse", "seizure", "unresponsive", "chest_clutch", "scream"):
+        pid = state.active_id or _fallback_patient_id()
+        if pid:
+            pstatus.mark_event(pid, ev.kind)
     fused = fuser.add(ev)
     if fused is not None:
         asyncio.create_task(handle_incident(fused))
@@ -153,8 +183,16 @@ async def _stream_text(kind: str, text: str, delay: float = 0.025) -> None:
 async def handle_incident(fused: FusedEvent) -> None:
     chart = _active()
     if chart is None:
-        log.warning("incident with no active patient; ignoring")
-        return
+        # A distress signal fired before a face was recognized. Bind it to a patient
+        # anyway so the incident shows and the nurse still gets paged (fail toward care).
+        pid = _fallback_patient_id()
+        chart = state.charts.get(pid)
+        if chart is None:
+            log.warning("incident but no patients loaded; ignoring")
+            return
+        state.active_id = pid
+        bus.publish(BusEvent(type="patient", payload=_patient_payload(chart)))
+        log.info("incident with no recognized face — bound to %s (fallback)", chart.name)
 
     bus.publish(BusEvent(type="fused", payload=fused.model_dump()))
     bus.publish(
@@ -265,6 +303,10 @@ async def lifespan(app: FastAPI):
     bus.bind_loop(loop)
     bus.set_tap(_mirror)  # mirror every event into the Supabase backend
     _load_cohort()
+    # Publish our public URL so the Vercel page can discover this backend at load
+    # time (set by scripts/serve_public.py once the tunnel is up).
+    if settings.public_url:
+        supa.set_backend_url(settings.public_url)
 
     def sink(ev: PerceptionEvent) -> None:  # called from perception threads
         loop.call_soon_threadsafe(_on_perception, ev)
@@ -310,6 +352,17 @@ async def fonts():
 @app.get("/health")
 async def health():
     return JSONResponse({"capabilities": _capabilities(), "active_patient": state.active_id})
+
+
+@app.get("/faces/{patient_id}.jpg")
+def patient_avatar(patient_id: str):
+    """Serve the enrolled face image for a patient (chart-card avatar)."""
+    g = _face_gallery()
+    img = g.image_for(patient_id) if g else None
+    path = (settings.cohort_path.parent / "faces" / img) if img else None
+    if path and path.exists():
+        return FileResponse(path, media_type="image/jpeg")
+    raise HTTPException(status_code=404, detail="no avatar")
 
 
 @app.get("/agent/patient-status/{patient_id}")
@@ -368,6 +421,17 @@ async def elevenlabs_webhook(request: Request):
     return JSONResponse({"ok": True, "turns": len(transcript)})
 
 
+@app.post("/agent/capture/{conversation_id}")
+async def capture(conversation_id: str):
+    """Manually capture an ElevenLabs conversation's transcript into the feed
+    (e.g. after a 'Talk to agent' widget test — pass its conversation_id)."""
+    from vigil.escalation.elevenlabs_call import capture_conversation_async
+
+    chart = _active()
+    capture_conversation_async(conversation_id, chart.name if chart else None)
+    return {"ok": True, "capturing": conversation_id}
+
+
 @app.get("/video")
 def video():
     def gen():
@@ -410,6 +474,7 @@ def _patient_payload(chart: PatientChart) -> dict:
         "conditions": chart.active_conditions,
         "medications": chart.active_medications,
         "vitals": {k: f"{v.value:g}{v.unit}" for k, v in chart.latest_vitals.items()},
+        "avatar": _avatar_for(chart.patient_id),
     }
 
 
