@@ -149,6 +149,31 @@ def test_escalation_is_derived_not_trusted():
     assert d.new_esi == 1 and d.escalate is True
 
 
+def test_esi_rubric_basis_flows_through():
+    """Every grade carries which ESI decision point + criterion drove it (auditable)."""
+    chart = make_chart(esi=3)
+    d = triage._finalize(
+        {
+            "new_esi": 2,
+            "action": "page_immediately",
+            "esi_decision_point": "D",
+            "esi_criteria": "Decision D: charted HR 118 > 100",
+            "rationale": "r",
+            "spoken_summary": "s",
+        },
+        chart,
+    )
+    assert d.esi_decision_point == "D"
+    assert "118" in d.esi_criteria
+
+
+def test_fail_safe_reports_decision_point():
+    chart = make_chart(esi=3)
+    d = triage._fail_safe(chart)
+    assert d.action == Action.PAGE_IMMEDIATELY
+    assert d.esi_decision_point == "A"  # fail-safe pages under the life-threat rule
+
+
 # --------------------------- reasoning requires a real key ---------------------------
 
 
