@@ -40,9 +40,14 @@ class EventBus:
     def __init__(self) -> None:
         self._subs: set[asyncio.Queue[BusEvent]] = set()
         self._loop: asyncio.AbstractEventLoop | None = None
+        self._tap = None  # optional observer: called with every event (e.g. Supabase logger)
 
     def bind_loop(self, loop: asyncio.AbstractEventLoop) -> None:
         self._loop = loop
+
+    def set_tap(self, fn) -> None:
+        """Register an observer invoked (non-blockingly) for every published event."""
+        self._tap = fn
 
     def subscribe(self) -> asyncio.Queue[BusEvent]:
         q: asyncio.Queue[BusEvent] = asyncio.Queue(maxsize=64)
@@ -62,6 +67,11 @@ class EventBus:
             try:
                 q.put_nowait(event)
             except asyncio.QueueFull:
+                pass
+        if self._tap is not None:
+            try:
+                self._tap(event)
+            except Exception:  # noqa: BLE001 — a logging failure must never break the bus
                 pass
 
     def publish(self, event: BusEvent) -> None:

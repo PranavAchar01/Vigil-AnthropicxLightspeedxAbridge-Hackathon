@@ -21,7 +21,8 @@ import time
 from contextlib import asynccontextmanager
 from pathlib import Path
 
-from fastapi import FastAPI, WebSocket, WebSocketDisconnect
+from fastapi import FastAPI, Header, HTTPException, Request, WebSocket, WebSocketDisconnect
+from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, StreamingResponse
 
 from vigil.chart import PatientChart, load_cohort
@@ -38,6 +39,8 @@ from vigil.events import BusEvent, FusedEvent, PerceptionEvent
 from vigil.perception.fusion import EventFuser
 from vigil.reasoning import triage
 from vigil.reasoning.triage import ReasoningNotConfigured
+from vigil.server import status as pstatus
+from vigil.server import supabase_sink as supa
 from vigil.server.bus import EventBus, FrameBuffer
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(name)s %(message)s")
@@ -90,7 +93,40 @@ def _capabilities() -> dict[str, bool]:
         "nurse_call": nurse_call_configured() or twilio_call_configured(),
         "patient_checkin": checkin_configured(),
         "cohort_loaded": bool(state.charts),
+        "backend": supa.configured(),
     }
+
+
+# Human-readable one-liner per event type, for the Supabase live feed.
+def _mirror(event: BusEvent) -> None:
+    p = event.payload
+    t = event.type
+    chart = _active()
+    patient = chart.name if chart else None
+    if t == "perception":
+        summary = f"{p.get('modality')}: {p.get('kind')} ({p.get('confidence')})"
+        source = str(p.get("modality"))
+    elif t == "fused":
+        summary = f"⚑ {p.get('summary')} · {str(p.get('severity')).upper()} [{'+'.join(p.get('kinds', []))}]"
+        source = "vision"
+    elif t == "decision":
+        summary = (
+            f"ESI {p.get('prior_esi')}→{p.get('new_esi')} · "
+            f"{str(p.get('action')).replace('_', ' ')}"
+        )
+        source = "claude"
+    elif t == "call_status":
+        summary = f"nurse call: {p.get('status')}"
+        source = "elevenlabs"
+    elif t == "escalation":
+        summary = f"{str(p.get('kind')).replace('_', ' ')} → {p.get('status')}"
+        source = "vigil"
+    elif t == "note":
+        summary = "ambient SOAP note + FHIR bundle written"
+        source = "claude"
+    else:
+        return  # skip noise: reasoning_delta, status/capabilities, patient
+    supa.log_event(t, source=source, patient=patient, summary=summary, payload=p)
 
 
 # --------------------------------------------------------------------------- #
@@ -101,6 +137,8 @@ def _capabilities() -> dict[str, bool]:
 def _on_perception(ev: PerceptionEvent) -> None:
     """Runs on the loop thread (scheduled via call_soon_threadsafe)."""
     bus.publish(BusEvent(type="perception", payload=ev.model_dump()))
+    if ev.kind in ("fall", "collapse", "scream") and state.active_id:
+        pstatus.mark_event(state.active_id, ev.kind)
     fused = fuser.add(ev)
     if fused is not None:
         asyncio.create_task(handle_incident(fused))
@@ -147,6 +185,15 @@ async def handle_incident(fused: FusedEvent) -> None:
 
     await _stream_text("reasoning_delta", decision.rationale)
     bus.publish(BusEvent(type="decision", payload=decision.model_dump()))
+    # record for the voice agent's get_patient_status tool (pre-computed; never in the call path)
+    pstatus.update_retriage(
+        chart.patient_id,
+        decision.new_esi,
+        decision.prior_esi,
+        decision.rationale,
+        decision.spoken_summary,
+        chart.to_context(),
+    )
 
     handler = NurseCallHandler(chart, bus=bus)
     actions = await asyncio.to_thread(run_ladder, decision, handler)
@@ -164,11 +211,41 @@ async def handle_incident(fused: FusedEvent) -> None:
 # --------------------------------------------------------------------------- #
 
 
+def _vision_status(track_id: int, posture: str, motion: str, moved: bool) -> None:
+    # single-participant demo: bind whatever the camera sees to the active patient
+    if state.active_id:
+        pstatus.update_vision(state.active_id, posture, motion, moved)
+
+
+def _vision_identify(pid: str, name: str, score: float) -> None:
+    """A recognized face -> make that patient active and pull up their chart."""
+    chart = state.charts.get(pid)
+    if chart is None:
+        return
+    state.active_id = pid
+    bus.publish_from_thread(BusEvent(type="patient", payload=_patient_payload(chart)))
+    log.info("face recognized -> %s (%.3f)", chart.name, score)
+    supa.log_event(
+        "identify",
+        source="vision",
+        patient=chart.name,
+        summary=f"face recognized → {chart.name} (match {score})",
+        payload={"patient_id": pid, "score": score},
+    )
+
+
 def _start_vision(sink) -> None:
     try:
         from vigil.perception.vision import run_vision
 
-        run_vision(sink, frames, state.stop, source=0)
+        run_vision(
+            sink,
+            frames,
+            state.stop,
+            source=0,
+            status_sink=_vision_status,
+            identify_sink=_vision_identify,
+        )
     except Exception as e:  # noqa: BLE001
         log.warning("vision disabled (%r) — install ML deps and connect a camera", e)
 
@@ -186,6 +263,7 @@ def _start_audio(sink) -> None:
 async def lifespan(app: FastAPI):
     loop = asyncio.get_running_loop()
     bus.bind_loop(loop)
+    bus.set_tap(_mirror)  # mirror every event into the Supabase backend
     _load_cohort()
 
     def sink(ev: PerceptionEvent) -> None:  # called from perception threads
@@ -205,6 +283,15 @@ async def lifespan(app: FastAPI):
 
 app = FastAPI(title="Vigil", lifespan=lifespan)
 
+# Allow the Vercel command-center frontend (and any dashboard origin) to read the
+# open endpoints cross-origin. Token-guarded routes stay protected by the header.
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
 
 @app.get("/", response_class=HTMLResponse)
 async def index():
@@ -223,6 +310,62 @@ async def fonts():
 @app.get("/health")
 async def health():
     return JSONResponse({"capabilities": _capabilities(), "active_patient": state.active_id})
+
+
+@app.get("/agent/patient-status/{patient_id}")
+def patient_status(patient_id: str, x_vigil_token: str = Header(default="")):
+    """The voice agent's get_patient_status webhook tool hits this mid-call.
+
+    Sync `def` on purpose: it runs in FastAPI's threadpool so the lock-guarded cache
+    read never blocks the event loop (video/reasoning streams). No LLM, no I/O.
+    """
+    if settings.agent_token and x_vigil_token != settings.agent_token:
+        raise HTTPException(status_code=401, detail="invalid or missing X-Vigil-Token")
+    return JSONResponse(pstatus.snapshot(patient_id))
+
+
+@app.get("/agent/patient-status")
+def patient_status_active(x_vigil_token: str = Header(default="")):
+    """Live status of the CURRENTLY active patient — the agent's tool hits this so it
+    never has to guess a patient_id over the phone."""
+    if settings.agent_token and x_vigil_token != settings.agent_token:
+        raise HTTPException(status_code=401, detail="invalid or missing X-Vigil-Token")
+    snap = pstatus.snapshot(state.active_id or "unknown")
+    chart = _active()
+    supa.log_event(
+        "tool_call",
+        source="agent",
+        patient=chart.name if chart else None,
+        summary=f"voice agent pulled live status → {snap.get('posture')}, "
+        f"{snap.get('motion_level')}, ESI {snap.get('triage', {}).get('esi_level')}",
+        payload=snap,
+    )
+    return JSONResponse(snap)
+
+
+@app.post("/webhooks/elevenlabs")
+async def elevenlabs_webhook(request: Request):
+    """Post-call webhook: ElevenLabs sends the conversation transcript here when a
+    call ends. We log each nurse question + agent answer so judges see the dialogue."""
+    body = await request.json()
+    data = body.get("data", body)
+    transcript = data.get("transcript", []) or data.get("messages", []) or []
+    chart = _active()
+    patient = chart.name if chart else None
+    for turn in transcript:
+        role = turn.get("role", "")
+        text = turn.get("message") or turn.get("text") or ""
+        if not text:
+            continue
+        who = "nurse" if role in ("user", "human") else "agent"
+        supa.log_event(
+            "conversation_turn",
+            source="elevenlabs",
+            patient=patient,
+            summary=f"{who}: {text[:120]}",
+            payload={"role": who, "text": text, "conversation_id": data.get("conversation_id")},
+        )
+    return JSONResponse({"ok": True, "turns": len(transcript)})
 
 
 @app.get("/video")

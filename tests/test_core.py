@@ -188,6 +188,70 @@ def test_torso_angle_upright_vs_lying():
     assert vision.torso_angle_deg(kp) > 75  # ~90 = horizontal
 
 
+# --------------------------- live status store (agent tool) ---------------------------
+
+
+def test_live_status_snapshot_roundtrip():
+    from vigil.server import status as ps
+
+    pid = "pt-live-1"
+    ps.update_vision(pid, "on the floor", "still", moved=False)
+    ps.mark_event(pid, "fall")
+    ps.update_retriage(
+        pid,
+        new_esi=1,
+        prev_esi=3,
+        rationale="collapse in cardiac pt",
+        spoken_summary="page now",
+        chart_summary="prior MI",
+    )
+    snap = ps.snapshot(pid)
+    assert snap["patient_id"] == pid
+    assert snap["posture"] == "on the floor"
+    assert snap["fall_detected"] is True
+    assert snap["triage"]["esi_level"] == 1
+    assert snap["triage"]["esi_changed"] is True
+    assert snap["triage"]["direction"] == "worsening"  # 3 -> 1 is more acute
+    assert snap["in_view"] is True  # just updated
+    assert snap["chart_summary"] == "prior MI"
+
+
+def test_live_status_unknown_patient_is_safe_default():
+    from vigil.server import status as ps
+
+    snap = ps.snapshot("never-seen")
+    assert snap["posture"] == "unknown"
+    assert snap["triage"]["esi_level"] is None
+
+
+# --------------------------- face gallery (patient identity) ---------------------------
+
+
+def test_face_gallery_matches_nearest_above_threshold():
+    from vigil.perception.faces import FaceGallery
+
+    g = FaceGallery(threshold=0.5)
+    g.add("pt-a", "Ariane", [1.0, 0.0, 0.0])
+    g.add("pt-b", "Dick", [0.0, 1.0, 0.0])
+    # a vector close to A resolves to A
+    m = g.identify([0.9, 0.1, 0.0])
+    assert m is not None and m[0] == "pt-a"
+    # an orthogonal / dissimilar vector stays unidentified (below threshold)
+    assert g.identify([0.0, 0.0, 1.0]) is None
+
+
+def test_face_gallery_json_roundtrip(tmp_path):
+    from vigil.perception.faces import FaceGallery
+
+    g = FaceGallery()
+    g.add("pt-a", "Ariane", [0.1, 0.2, 0.3])
+    p = tmp_path / "gallery.json"
+    p.write_text(g.to_json())
+    g2 = FaceGallery.load(p)
+    assert len(g2) == 1
+    assert g2.identify([0.1, 0.2, 0.3])[0] == "pt-a"
+
+
 # --------------------------- FHIR bundle shape ---------------------------
 
 

@@ -13,7 +13,7 @@ from collections import deque
 from vigil.events import FusedEvent, PerceptionEvent, PerceptionKind, Severity
 
 # Signals that, on their own, already warrant a hard (page-now) response.
-HARD_ALONE: set[PerceptionKind] = {"fall"}
+HARD_ALONE: set[PerceptionKind] = {"fall", "collapse"}
 # Signals that are ambiguous alone → voice check-in first.
 SOFT_ALONE: set[PerceptionKind] = {"motionless", "slump", "agitation"}
 
@@ -70,10 +70,15 @@ class EventFuser:
         self, kinds: set[PerceptionKind], conf: dict[PerceptionKind, float]
     ) -> tuple[Severity | None, list[PerceptionKind], str]:
         has_fall = "fall" in kinds
+        has_collapse = "collapse" in kinds
         has_scream = "scream" in kinds
+        down = has_fall or has_collapse
+        down_kind: PerceptionKind = "collapse" if has_collapse else "fall"
 
-        if has_fall and has_scream:
-            return Severity.HARD, ["scream", "fall"], "Scream + collapse detected"
+        if down and has_scream:
+            return Severity.HARD, ["scream", down_kind], "Scream + collapse detected"
+        if has_collapse:
+            return Severity.HARD, ["collapse"], "Patient collapsed / fainted — motionless"
         if has_fall:
             return Severity.HARD, ["fall"], "Collapse detected"
         if has_scream and conf.get("scream", 0.0) >= 0.6:

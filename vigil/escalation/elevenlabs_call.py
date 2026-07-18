@@ -105,6 +105,9 @@ class NurseCallHandler:
             f"{v.label} {v.value:g}{v.unit}" for v in self.chart.latest_vitals.values()
         )
         return {
+            # patient_id is injected here (never LLM-filled) so the get_patient_status
+            # tool always fetches the RIGHT patient — no hallucinated IDs over the phone.
+            "patient_id": self.chart.patient_id,
             "patient_name": self.chart.name,
             "chart_summary": (
                 f"{self.chart.age} year old, {self.chart.visit_title}. "

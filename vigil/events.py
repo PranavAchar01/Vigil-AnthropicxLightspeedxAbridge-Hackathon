@@ -34,7 +34,9 @@ class Action(str, Enum):
 
 
 # Discrete signals the perception layer can raise.
-PerceptionKind = Literal["fall", "scream", "motionless", "slump", "agitation", "chest_clutch"]
+PerceptionKind = Literal[
+    "fall", "collapse", "scream", "motionless", "slump", "agitation", "chest_clutch"
+]
 
 
 class PerceptionEvent(BaseModel):

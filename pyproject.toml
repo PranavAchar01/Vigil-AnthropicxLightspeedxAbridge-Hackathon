@@ -24,6 +24,8 @@ dependencies = [
 # YAMNet (AudioSet "Screaming"/"Shout" classes) via TF-Hub is the default,
 # with an energy+spectral heuristic fallback that needs no heavy deps.
 audio = ["tensorflow>=2.16", "tensorflow-hub>=0.16", "librosa>=0.10"]
+# On-device face recognition: bind a detected face to its patient chart.
+faces = ["insightface>=0.7.3", "onnxruntime>=1.17"]
 
 [build-system]
 requires = ["hatchling"]

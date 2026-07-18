@@ -36,8 +36,13 @@ MOTIONLESS_EPS = 0.012
 SLUMP_DEG = 32.0
 SLUMP_S = 12.0
 COOLDOWN_S = 8.0
+# Faint/collapse: a person already down/slumped who goes still this long (research
+# COLLAPSE_MOTIONLESS state). Fast on purpose — this is the "fainted" signal.
+FAINT_SECONDS = 6.0
 
 Sink = Callable[[PerceptionEvent], None]
+# (track_id, posture, motion_level, moved) — per-frame live status for the voice agent
+StatusSink = Callable[[int, str, str, bool], None]
 
 
 def _mid(a, b):
@@ -63,6 +68,7 @@ class TrackState:
     ground_since: float = 0.0
     still_since: float = 0.0
     slump_since: float = 0.0
+    faint_since: float = 0.0
     last_emit: dict = field(default_factory=lambda: defaultdict(float))
 
 
@@ -72,13 +78,16 @@ class VisionDetector:
         model_path: str = "yolo11n-pose.pt",
         device: str | None = None,
         emit: Sink = lambda e: None,
+        emit_status: StatusSink = lambda *a: None,
     ) -> None:
         from ultralytics import YOLO  # lazy: heavy import
 
         self.model = YOLO(model_path)
         self.device = device
         self.emit = emit
+        self.emit_status = emit_status
         self.tracks: dict[int, TrackState] = {}
+        self._last_status_ts = 0.0
 
     def status_line(self) -> str:
         states = [t.state for t in self.tracks.values()]
@@ -165,7 +174,8 @@ class VisionDetector:
                 if not horiz:
                     tk.state, tk.ground_frames = "upright", 0
 
-            # soft signal: motionlessness
+            # soft signal: motionlessness (disp also drives the live motion level)
+            disp = 0.0
             if tk.kp_prev is not None:
                 m = visible & (tk.kp_prev[:, 2] >= KP_CONF)
                 if m.any():
@@ -180,13 +190,44 @@ class VisionDetector:
             tk.kp_prev = np.concatenate([kp, kc[:, None]], axis=1)
 
             # soft signal: posture slump (sustained lean while upright)
+            slumping = False
             if tk.state == "upright" and SLUMP_DEG <= ang < TORSO_HORIZ_DEG:
+                slumping = True
                 if tk.slump_since == 0.0:
                     tk.slump_since = ts
                 elif ts - tk.slump_since >= SLUMP_S:
                     self._fire(ts, "slump", tid, 0.6)
             else:
                 tk.slump_since = 0.0
+
+            # collapse / faint: down or slumped AND motionless for FAINT_SECONDS
+            if (tk.state in ("on_ground", "fallen") or slumping) and disp < MOTIONLESS_EPS:
+                if tk.faint_since == 0.0:
+                    tk.faint_since = ts
+                elif ts - tk.faint_since >= FAINT_SECONDS:
+                    self._fire(ts, "collapse", tid, 0.85)
+            else:
+                tk.faint_since = 0.0
+
+            # live status for the voice agent (throttled ~2/sec)
+            if ts - self._last_status_ts >= 0.4:
+                self._last_status_ts = ts
+                posture = (
+                    "on the floor"
+                    if tk.state in ("on_ground", "fallen")
+                    else "slumped"
+                    if slumping
+                    else "upright"
+                )
+                moved = disp >= MOTIONLESS_EPS
+                motion = (
+                    "still"
+                    if disp < MOTIONLESS_EPS
+                    else "slight"
+                    if disp < 3 * MOTIONLESS_EPS
+                    else "active"
+                )
+                self.emit_status(tid, posture, motion, moved)
 
         return res
 
@@ -204,12 +245,32 @@ def run_vision(
     source=0,
     device: str | None = None,
     model_path: str = "yolo11n-pose.pt",
+    status_sink: StatusSink = lambda *a: None,
+    identify_sink=lambda pid, name, score: None,
 ) -> None:
     """Blocking capture loop; run in a daemon thread. Encodes annotated frames
-    into `frame_buffer` and publishes PerceptionEvents through `sink`."""
+    into `frame_buffer`, publishes PerceptionEvents through `sink`, per-frame live
+    status through `status_sink`, and (if a face gallery is enrolled) the identified
+    patient through `identify_sink`."""
     import cv2
 
-    det = VisionDetector(model_path=model_path, device=device, emit=sink)
+    det = VisionDetector(model_path=model_path, device=device, emit=sink, emit_status=status_sink)
+
+    # optional on-device face recognition -> which patient is on camera
+    recognizer, gallery, last_pid, frame_i = None, None, None, 0
+    from vigil.config import settings
+
+    if settings.face_gallery_path.exists():
+        try:
+            from vigil.perception.faces import FaceGallery, FaceRecognizer
+
+            gallery = FaceGallery.load(settings.face_gallery_path, settings.face_match_threshold)
+            recognizer = FaceRecognizer()
+            print(f"[vision] face recognition on; {len(gallery)} patients enrolled")
+        except Exception as e:  # noqa: BLE001
+            print(f"[vision] face recognition unavailable ({e!r}); running without it")
+            recognizer = None
+
     cap = cv2.VideoCapture(source)
     if not cap.isOpened():
         print(f"[vision] could not open camera source={source}; vision disabled")
@@ -221,6 +282,18 @@ def run_vision(
             if not ok:
                 time.sleep(0.05)
                 continue
+
+            frame_i += 1
+            if recognizer and gallery and frame_i % settings.face_identify_every_n == 0:
+                try:
+                    emb = recognizer.embed_largest(frame)
+                    match = gallery.identify(emb) if emb is not None else None
+                    if match and match[0] != last_pid:
+                        last_pid = match[0]
+                        identify_sink(match[0], match[1], round(match[2], 3))
+                except Exception:  # noqa: BLE001 — recognition must never break the feed
+                    pass
+
             res = det.process(frame, ts=time.time())
             annotated = res.plot() if res is not None else frame
             cv2.putText(

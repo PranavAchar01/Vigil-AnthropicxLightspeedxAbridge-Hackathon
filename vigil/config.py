@@ -57,6 +57,29 @@ class Settings:
     twilio_auth_token: str = field(default_factory=lambda: _env("TWILIO_AUTH_TOKEN"))
     twilio_from_number: str = field(default_factory=lambda: _env("TWILIO_FROM_NUMBER"))
 
+    # --- Conversational agent live-status endpoint ---
+    # Shared secret the agent's webhook tool sends in X-Vigil-Token; public base URL
+    # (the tunnel, e.g. https://vigil.example.com) that ElevenLabs reaches us at.
+    agent_token: str = field(default_factory=lambda: _env("VIGIL_AGENT_TOKEN"))
+    public_url: str = field(default_factory=lambda: _env("VIGIL_PUBLIC_URL"))
+    agent_voice_id: str = field(
+        default_factory=lambda: _env("VIGIL_AGENT_VOICE_ID", "EXAVITQu4vr4xnSDxMaL")
+    )
+
+    # --- Face recognition (bind a detected face -> patient chart; on-device) ---
+    face_gallery_path: Path = field(
+        default_factory=lambda: (
+            Path(__file__).resolve().parent.parent / "data" / "face_gallery.json"
+        )
+    )
+    face_match_threshold: float = field(default_factory=lambda: _envf("VIGIL_FACE_THRESHOLD", 0.45))
+    face_identify_every_n: int = field(default_factory=lambda: int(_envf("VIGIL_FACE_EVERY_N", 15)))
+
+    # --- Supabase observability backend ---
+    supabase_url: str = field(default_factory=lambda: _env("SUPABASE_URL").rstrip("/"))
+    supabase_secret_key: str = field(default_factory=lambda: _env("SUPABASE_SECRET_KEY"))
+    supabase_publishable_key: str = field(default_factory=lambda: _env("SUPABASE_PUBLISHABLE_KEY"))
+
     # --- Data ---
     dataset_path: Path = field(
         default_factory=lambda: Path(
