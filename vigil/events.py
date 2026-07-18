@@ -39,6 +39,11 @@ PerceptionKind = Literal[
     "seizure",  # oscillatory convulsion sustained >= 5s (hard)
     "scream",  # audio distress vocalization (hard)
     "slump",  # sustained posture degradation (soft)
+    # provisional UI-only signals — instant feedback the MOMENT a fall is seen, before
+    # the 5s validation completes. They never fuse/reason/page; the dashboard renders
+    # them as a "validating…" state that resolves into `fainted` (confirmed) or clears.
+    "fall_detected",  # went down just now — start the 5s validation countdown
+    "fall_cleared",  # got back up before validating — no escalation
     # deprecated — no longer emitted, kept so old serialized events still validate:
     "fall", "collapse", "unresponsive", "motionless", "agitation", "chest_clutch",
 ]

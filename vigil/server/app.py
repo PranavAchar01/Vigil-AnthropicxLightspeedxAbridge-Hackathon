@@ -163,13 +163,43 @@ def _mirror(event: BusEvent) -> None:
 # --------------------------------------------------------------------------- #
 
 
+def _patient_name(pid: str) -> str | None:
+    chart = state.charts.get(pid)
+    return chart.name if chart else None
+
+
 def _on_perception(ev: PerceptionEvent) -> None:
     """Runs on the loop thread (scheduled via call_soon_threadsafe)."""
+    # Provisional fall signals are INSTANT UI feedback only: show the "validating…"
+    # countdown the moment a fall is seen, but never fuse/reason/page on them. The nurse
+    # is only paged once the fall validates into `fainted` (below).
+    if ev.kind in ("fall_detected", "fall_cleared"):
+        pid = state.active_id or _fallback_patient_id()
+        bus.publish(
+            BusEvent(
+                type="fall_validation",
+                payload={
+                    "state": "detected" if ev.kind == "fall_detected" else "cleared",
+                    "validate_s": float(ev.meta.get("validate_s", 0.0)),
+                    "patient": _patient_name(pid),
+                    "ts": ev.ts,
+                },
+            )
+        )
+        return
+
     bus.publish(BusEvent(type="perception", payload=ev.model_dump()))
     if ev.kind in ("fainted", "seizure", "scream"):
         pid = state.active_id or _fallback_patient_id()
         if pid:
             pstatus.mark_event(pid, ev.kind)
+        if ev.kind == "fainted":  # the validation completed → flip the banner to confirmed
+            bus.publish(
+                BusEvent(
+                    type="fall_validation",
+                    payload={"state": "confirmed", "patient": _patient_name(pid), "ts": ev.ts},
+                )
+            )
     fused = fuser.add(ev)
     if fused is not None:
         asyncio.create_task(handle_incident(fused))

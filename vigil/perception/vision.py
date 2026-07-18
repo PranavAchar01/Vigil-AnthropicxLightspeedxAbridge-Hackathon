@@ -126,6 +126,7 @@ class PersonState:
     fall_since: float = 0.0
     still_since: float = 0.0
     faint_since: float = 0.0
+    fall_pending: bool = False  # went down; validation countdown running, not yet confirmed
     seizure_since: float = 0.0
     seizure_last: float = 0.0  # last frame the shaking was above threshold (hysteresis)
     slump_since: float = 0.0
@@ -182,6 +183,22 @@ class VisionDetector:
             )
         )
 
+    def _provisional(self, ts: float, kind: str, validate_s: float) -> None:
+        """Emit an INSTANT, UI-only signal (fall_detected / fall_cleared). Edge-
+        triggered (no cooldown) and non-escalating: the server routes it to the
+        dashboard's validation banner but never fuses/reasons/pages on it. `validate_s`
+        tells the UI how long the on-ground validation window is (drives the countdown)."""
+        self.emit(
+            PerceptionEvent(
+                ts=ts,
+                modality=Modality.VISION,
+                kind=kind,
+                confidence=0.5,
+                track_id=1,
+                meta={"validate_s": round(float(validate_s), 2)},
+            )
+        )
+
     def _largest_person(self, res):
         if res.keypoints is None or res.boxes is None or len(res.boxes) == 0:
             return None
@@ -200,9 +217,13 @@ class VisionDetector:
 
         person = self._largest_person(res)
         if person is None:
+            if self.st.fall_pending:  # lost the person mid-validation → clear the UI banner
+                self.st.fall_pending = False
+                self._provisional(ts, "fall_cleared", 0.0)
             self.metrics = {"present": False}
             self.st.kp_prev = None
             self.st.sh_prev = None
+            self.st.faint_since = 0.0
             self._prev_gray = None
             self._prev_box_center = None
             self.st.tremor_since = 0.0
@@ -367,10 +388,18 @@ class VisionDetector:
         )
         if went_down:
             self.st.fsm = "down"
-            self.st.faint_since = self.st.faint_since or ts
-            if ts - self.st.faint_since >= self.p.faint_s:  # ON THE GROUND >= 5s
+            if not self.st.faint_since:  # FIRST frame down → flag it on the UI instantly
+                self.st.faint_since = ts
+                self.st.fall_pending = True
+                self.flash = ("FALL DETECTED — validating", ts)
+                self._provisional(ts, "fall_detected", self.p.faint_s)
+            if ts - self.st.faint_since >= self.p.faint_s:  # ON THE GROUND >= 5s → confirm
+                self.st.fall_pending = False
                 self._fire(ts, "fainted", 0.9, "FAINTED — down 5s, not recovering")
         else:
+            if self.st.fall_pending:  # got back up before the 5s validation → clear it
+                self.st.fall_pending = False
+                self._provisional(ts, "fall_cleared", 0.0)
             self.st.faint_since = 0.0
 
         # 2) SEIZURE — oscillatory shaking sustained >= seizure_s (5s) before firing.
@@ -459,6 +488,14 @@ class VisionDetector:
         for line in panel:
             cv2.putText(frame, line, (16, y), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (120, 255, 170), 1)
             y += 22
+        # fall validation countdown — amber banner while a fall is being validated (< 5s)
+        if self.st.fall_pending and self.st.faint_since:
+            remaining = max(0.0, self.p.faint_s - (time.time() - self.st.faint_since))
+            txt = f"FALL DETECTED  validating {remaining:0.1f}s"
+            (tw, th), _ = cv2.getTextSize(txt, cv2.FONT_HERSHEY_SIMPLEX, 0.9, 2)
+            x = (W - tw) // 2
+            cv2.rectangle(frame, (x - 14, 40), (x + tw + 14, 84), (0, 0, 0), -1)
+            cv2.putText(frame, txt, (x, 71), cv2.FONT_HERSHEY_SIMPLEX, 0.9, (60, 190, 240), 2)
         # event flash (persist ~2.5s)
         if self.flash and time.time() - self.flash[1] < 2.5:
             txt = self.flash[0]
