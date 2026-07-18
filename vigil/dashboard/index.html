@@ -149,6 +149,7 @@
     </div>
     <div class="videoframe glass-sub">
       <img id="cam" alt="" />
+      <button id="pausebtn" onclick="togglePause()" style="position:absolute;bottom:10px;right:10px;z-index:5;padding:8px 14px;border-radius:10px;border:1px solid rgba(255,255,255,.25);cursor:pointer;font:inherit;font-weight:600;background:rgba(0,0,0,.55);color:#fff;backdrop-filter:blur(6px)">⏸ Pause</button>
       <div class="cam-standby" id="cam-standby">
         <span class="glass-icon lg" aria-hidden="true">
           <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="m16 13 5.22 3.48a.5.5 0 0 0 .78-.42V7.94a.5.5 0 0 0-.75-.43L16 10.5"/><rect x="2" y="6" width="14" height="12" rx="2"/></svg>
@@ -219,6 +220,14 @@ function setCap(name, on){
   const el=document.querySelector(`.cap[data-cap="${name}"]`);
   if(el) el.classList.toggle("on", !!on);
 }
+function setPaused(on){
+  const b=$("pausebtn"); if(!b) return;
+  b.textContent = on ? "▶ Resume" : "⏸ Pause";
+  b.style.background = on ? "rgba(210,120,0,.8)" : "rgba(0,0,0,.55)";
+}
+async function togglePause(){
+  try{ const r=await fetch("/pause",{method:"POST"}); const j=await r.json(); setPaused(j.paused); }catch(e){}
+}
 function line(html,cls){
   if(traceFresh){ trace.innerHTML=""; traceFresh=false; }
   const d=document.createElement("div"); d.className="line"+(cls?" "+cls:"");
@@ -249,6 +258,7 @@ function handle(ev){
     if(p.capabilities){ ["reasoning","nurse_call","patient_checkin"].forEach(k=>setCap(k,p.capabilities[k])); }
     if(p.level==="error"){ setBanner("Configuration needed",true); logItem(`<b>config</b> ${p.message||""}`); }
   }
+  else if(type==="paused") setPaused(p.paused);
   else if(type==="perception") line(`· ${p.modality}: ${p.kind} <span class="faint">(${p.confidence})</span>`,"faint");
   else if(type==="fused"){ traceFresh=true; deltaLine=null;
     line(`⚑ ${p.summary} — ${p.severity.toUpperCase()} <span class="faint">[${p.kinds.join(" + ")}] conf ${p.confidence}</span>`,"signal"); }

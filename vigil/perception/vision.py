@@ -376,8 +376,15 @@ class VisionDetector:
         # 2) SEIZURE — oscillatory shaking sustained >= seizure_s (5s) before firing.
         # Brief dips in the signal are NORMAL in a real convulsion, so we don't reset
         # the timer on a single low frame — only after the shaking has clearly STOPPED
-        # for > 1s. This is what lets a genuine 5s+ seizure fire despite fluctuation.
-        seizing_now = seizure_energy >= self.p.seizure_motion and reversals >= self.p.seizure_osc
+        # for > 2s. This is what lets a genuine 5s+ seizure fire despite fluctuation.
+        # GATE: a person who is going DOWN (falling / horizontal / on the floor) is
+        # FAINTING, not seizing — the fall's impact motion must never read as seizure.
+        # So a seizure is only recognized while the person is upright/in-place.
+        seizing_now = (
+            not went_down
+            and seizure_energy >= self.p.seizure_motion
+            and reversals >= self.p.seizure_osc
+        )
         if seizing_now:
             self.st.seizure_since = self.st.seizure_since or ts
             self.st.seizure_last = ts
@@ -595,6 +602,7 @@ def run_vision(
     model_path: str = "yolo11n-pose.pt",
     status_sink: StatusSink = lambda *a: None,
     identify_sink=lambda pid, name, score: None,
+    pause_event=None,
 ) -> None:
     """Blocking capture loop; run in a daemon thread. Encodes annotated frames into
     `frame_buffer`, publishes PerceptionEvents through `sink`, per-frame live status
@@ -647,6 +655,17 @@ def run_vision(
                 if is_file:  # loop the demo clip so the app keeps showing it
                     cap.set(cv2.CAP_PROP_POS_FRAMES, 0)
                     continue
+                time.sleep(0.05)
+                continue
+
+            # DEMO PAUSE — keep streaming live video but run no detection (no events).
+            if pause_event is not None and pause_event.is_set():
+                cv2.putText(
+                    frame, "PAUSED", (12, 60), cv2.FONT_HERSHEY_SIMPLEX, 1.2, (0, 200, 255), 3
+                )
+                ok, jpg = cv2.imencode(".jpg", frame, [cv2.IMWRITE_JPEG_QUALITY, 70])
+                if ok:
+                    frame_buffer.set(jpg.tobytes())
                 time.sleep(0.05)
                 continue
 

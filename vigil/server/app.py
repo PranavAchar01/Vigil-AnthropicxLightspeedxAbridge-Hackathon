@@ -61,6 +61,7 @@ class State:
     charts: dict[str, PatientChart] = {}
     active_id: str = ""
     stop = threading.Event()
+    pause = threading.Event()  # demo pause: freeze detection while the camera streams
 
 
 state = State()
@@ -285,6 +286,7 @@ def _start_vision(sink) -> None:
             source=source,
             status_sink=_vision_status,
             identify_sink=_vision_identify,
+            pause_event=state.pause,
         )
     except Exception as e:  # noqa: BLE001
         log.warning("vision disabled (%r) — install ML deps and connect a camera", e)
@@ -359,6 +361,18 @@ async def fonts():
 @app.get("/health")
 async def health():
     return JSONResponse({"capabilities": _capabilities(), "active_patient": state.active_id})
+
+
+@app.post("/pause")
+async def pause_toggle():
+    """Demo pause: freeze detection (no events fire) while the camera keeps streaming."""
+    if state.pause.is_set():
+        state.pause.clear()
+    else:
+        state.pause.set()
+    paused = state.pause.is_set()
+    bus.publish(BusEvent(type="paused", payload={"paused": paused}))
+    return {"paused": paused}
 
 
 @app.get("/faces/{patient_id}.jpg")
