@@ -51,7 +51,7 @@ class Settings:
         default_factory=lambda: _env("OPENAI_REALTIME_MODEL", "gpt-realtime")
     )
     openai_realtime_voice: str = field(
-        default_factory=lambda: _env("OPENAI_REALTIME_VOICE", "alloy")
+        default_factory=lambda: _env("OPENAI_REALTIME_VOICE", "marin")
     )
 
     # --- ElevenLabs ---
@@ -61,12 +61,18 @@ class Settings:
         default_factory=lambda: _env("ELEVENLABS_PHONE_NUMBER_ID")
     )
     nurse_phone_number: str = field(default_factory=lambda: _env("NURSE_PHONE_NUMBER"))
-    # Anti-spam: cap outbound nurse calls so a Twilio TRIAL is never spam-dialed.
-    # Default = ONE call per server run. -1 = unlimited; a cooldown (seconds) can
-    # instead space repeat calls when the cap is raised.
-    max_nurse_calls: int = field(default_factory=lambda: int(_envf("VIGIL_MAX_NURSE_CALLS", 1)))
+    # Anti-spam: the primary control is ONE nurse call PER ISSUE (an incident pages
+    # once, no matter how many times its signals re-fire while the patient is still
+    # down). A distinct later incident can page again. max_nurse_calls is a secondary
+    # hard cap on TOTAL calls per run (-1 = unlimited, the default, since per-issue
+    # dedup already prevents spam). nurse_issue_gap_s = quiet seconds with no hard
+    # signal after which the next hard event counts as a NEW issue (can page again).
+    max_nurse_calls: int = field(default_factory=lambda: int(_envf("VIGIL_MAX_NURSE_CALLS", -1)))
     nurse_call_cooldown_s: float = field(
         default_factory=lambda: _envf("VIGIL_NURSE_CALL_COOLDOWN_S", 0.0)
+    )
+    nurse_issue_gap_s: float = field(
+        default_factory=lambda: _envf("VIGIL_NURSE_ISSUE_GAP_S", 30.0)
     )
     # optional: real voice check-in with the patient before paging (soft signals)
     patient_kiosk_number: str = field(default_factory=lambda: _env("PATIENT_KIOSK_NUMBER"))

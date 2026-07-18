@@ -32,30 +32,39 @@ log = logging.getLogger("vigil.escalation")
 BASE = "https://api.elevenlabs.io/v1"
 
 # --------------------------------------------------------------------------- #
-# Outbound-call rate limit — so a Twilio TRIAL is NEVER spam-dialed.
-# One successful nurse call per server run by default (VIGIL_MAX_NURSE_CALLS);
-# a placed call is reserved atomically, and released only if it fails to dial.
+# Outbound-call gate — ONE nurse call PER ISSUE, so a Twilio trial is never
+# spam-dialed. An "issue" is one incident (delimited upstream in the server by a
+# quiet gap); no matter how many times a fall/seizure/scream re-fires while the
+# same person is still down, that issue pages the nurse exactly once. A distinct
+# later incident (new issue id) can page again. A placed call is reserved
+# atomically and released only if it fails to dial. VIGIL_MAX_NURSE_CALLS is a
+# secondary hard cap on TOTAL calls per run (-1 = unlimited; per-issue is primary).
 # --------------------------------------------------------------------------- #
 MAX_CALLS = settings.max_nurse_calls
 COOLDOWN_S = settings.nurse_call_cooldown_s
 _CALL_LOCK = threading.Lock()
 _CALL_LOG: dict[str, float] = {}  # number -> last successful-dial monotonic time
 _CALL_COUNT = 0
+_ISSUES_CALLED: set[int] = set()  # issue ids that have already paged the nurse
 
 
 def reset_call_gate() -> None:
-    """Clear the outbound-call counter (new demo run / tests)."""
+    """Clear the outbound-call counter + per-issue history (new demo run / tests)."""
     global _CALL_COUNT
     with _CALL_LOCK:
         _CALL_COUNT = 0
         _CALL_LOG.clear()
+        _ISSUES_CALLED.clear()
 
 
-def _reserve_call(to_number: str) -> tuple[bool, str]:
+def _reserve_call(to_number: str, issue_id: int | None = None) -> tuple[bool, str]:
     """Atomically claim a call slot. Returns (allowed, reason_if_blocked)."""
     global _CALL_COUNT
     with _CALL_LOCK:
         now = time.monotonic()
+        # ONE call per issue: the primary control. Same incident re-firing -> no re-dial.
+        if issue_id is not None and issue_id in _ISSUES_CALLED:
+            return False, f"issue #{issue_id} already paged the nurse (one call per issue)"
         if 0 <= MAX_CALLS <= _CALL_COUNT:
             return False, f"already placed {_CALL_COUNT} call(s); max {MAX_CALLS} per run"
         last = _CALL_LOG.get(to_number)
@@ -63,15 +72,19 @@ def _reserve_call(to_number: str) -> tuple[bool, str]:
             return False, f"cooldown {COOLDOWN_S:g}s not elapsed"
         _CALL_COUNT += 1
         _CALL_LOG[to_number] = now
+        if issue_id is not None:
+            _ISSUES_CALLED.add(issue_id)
         return True, ""
 
 
-def _release_call(to_number: str) -> None:
-    """Return the slot if the call never actually dialed (so a later real incident can)."""
+def _release_call(to_number: str, issue_id: int | None = None) -> None:
+    """Return the slot if the call never actually dialed (so the SAME issue can retry)."""
     global _CALL_COUNT
     with _CALL_LOCK:
         _CALL_COUNT = max(0, _CALL_COUNT - 1)
         _CALL_LOG.pop(to_number, None)
+        if issue_id is not None:
+            _ISSUES_CALLED.discard(issue_id)
 
 
 # distress words that make a patient's spoken reply NON-reassuring
@@ -191,9 +204,10 @@ def capture_conversation_async(conversation_id: str, patient_name: str | None) -
 class NurseCallHandler:
     """Concrete EscalationHandlers, bound to the incident's chart."""
 
-    def __init__(self, chart: PatientChart, bus=None) -> None:
+    def __init__(self, chart: PatientChart, bus=None, issue_id: int | None = None) -> None:
         self.chart = chart
         self.bus = bus
+        self.issue_id = issue_id  # dedup key: one nurse call per incident
 
     def _emit(self, status: str, **extra) -> None:
         if self.bus is not None:
@@ -247,7 +261,7 @@ class NurseCallHandler:
     def call_nurse(self, decision: TriageDecision) -> EscalationAction:
         """Gate every outbound nurse call through the anti-spam limiter, then dial."""
         to = settings.nurse_phone_number or "nurse"
-        allowed, why = _reserve_call(to)
+        allowed, why = _reserve_call(to, self.issue_id)
         if not allowed:
             log.info("nurse call suppressed: %s", why)
             self._emit("suppressed", to=settings.nurse_phone_number, message=why)
@@ -260,7 +274,7 @@ class NurseCallHandler:
             )
         action = self._do_call_nurse(decision)
         if action.status == "failed":  # never dialed → free the slot for a later real incident
-            _release_call(to)
+            _release_call(to, self.issue_id)
         return action
 
     def _realtime_call(self, decision: TriageDecision) -> EscalationAction:

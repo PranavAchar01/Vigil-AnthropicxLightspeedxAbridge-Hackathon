@@ -119,6 +119,34 @@ def test_ladder_hold_does_nothing():
     assert actions[0].kind == "none"
 
 
+# --------------------------- one call per issue ---------------------------
+
+
+def test_one_call_per_issue_gate():
+    from vigil.escalation import elevenlabs_call as ec
+
+    ec.reset_call_gate()
+    # first page for issue #1 is allowed
+    ok, _ = ec._reserve_call("+1", issue_id=1)
+    assert ok is True
+    # the SAME issue re-firing does NOT page again
+    ok, why = ec._reserve_call("+1", issue_id=1)
+    assert ok is False and "one call per issue" in why
+    # a DISTINCT later incident (new issue id) may page
+    ok, _ = ec._reserve_call("+1", issue_id=2)
+    assert ok is True
+
+
+def test_failed_call_releases_issue_for_retry():
+    from vigil.escalation import elevenlabs_call as ec
+
+    ec.reset_call_gate()
+    assert ec._reserve_call("+1", issue_id=7)[0] is True
+    ec._release_call("+1", issue_id=7)  # never actually dialed
+    # the same issue can try again after a release (so a transient failure isn't fatal)
+    assert ec._reserve_call("+1", issue_id=7)[0] is True
+
+
 # --------------------------- monotonic clamp ---------------------------
 
 

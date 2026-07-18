@@ -69,6 +69,10 @@ class State:
     active_id: str = ""
     stop = threading.Event()
     pause = threading.Event()  # demo pause: freeze detection while the camera streams
+    # One-call-per-issue: an incident keeps the SAME issue_id while its signals keep
+    # re-firing; after nurse_issue_gap_s of quiet, the next hard event is a NEW issue.
+    issue_id: int = 0
+    last_hard_ts: float = 0.0
 
 
 state = State()
@@ -235,6 +239,13 @@ async def handle_incident(fused: FusedEvent) -> None:
         bus.publish(BusEvent(type="patient", payload=_patient_payload(chart)))
         log.info("incident with no recognized face — bound to %s (fallback)", chart.name)
 
+    # One call per issue: keep the same issue_id while a single incident's signals keep
+    # re-firing; only start a new issue (which may page again) after a quiet gap.
+    now = time.time()
+    if now - state.last_hard_ts > settings.nurse_issue_gap_s:
+        state.issue_id += 1
+    state.last_hard_ts = now
+
     bus.publish(BusEvent(type="fused", payload=fused.model_dump()))
     bus.publish(
         BusEvent(
@@ -274,7 +285,7 @@ async def handle_incident(fused: FusedEvent) -> None:
         chart.to_context(),
     )
 
-    handler = NurseCallHandler(chart, bus=bus)
+    handler = NurseCallHandler(chart, bus=bus, issue_id=state.issue_id)
     actions = await asyncio.to_thread(run_ladder, decision, handler)
     for a in actions:
         bus.publish(BusEvent(type="escalation", payload=a.model_dump()))
