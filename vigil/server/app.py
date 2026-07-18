@@ -164,6 +164,12 @@ def _mirror(event: BusEvent) -> None:
     elif t == "note":
         summary = "ambient SOAP note + FHIR bundle written"
         source = "claude"
+    elif t == "initial_triage":
+        summary = (
+            f"voice intake → ESI {p.get('esi')} · decision {p.get('esi_decision_point')} · "
+            f"{p.get('chief_complaint')}"
+        )
+        source = "claude"
     else:
         return  # skip noise: reasoning_delta, status/capabilities, patient
     supa.log_event(t, source=source, patient=patient, summary=summary, payload=p)

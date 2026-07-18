@@ -2,6 +2,7 @@
 
 import { useEffect, useRef, useState } from "react";
 import BackendFeed from "./BackendFeed";
+import VoiceIntake from "./VoiceIntake";
 import { supabase } from "./lib/supabase";
 
 // The backend runs on a laptop behind an ephemeral tunnel. It publishes its current
@@ -224,6 +225,13 @@ export default function Home() {
             bundle: cleanText(payload.bundle_path).split("/").pop(),
           });
           break;
+        case "initial_triage":
+          freshRef.current = true;
+          pushLine(
+            "signal-line",
+            `Voice intake / initial ESI ${payload.esi} (decision ${payload.esi_decision_point}) / ${cleanText(payload.chief_complaint)}`,
+          );
+          break;
       }
     };
 
@@ -370,6 +378,8 @@ export default function Home() {
               </div>
             </div>
           </article>
+
+          <VoiceIntake backend={backend} />
         </section>
 
         <section className="workspace-panel reasoning-panel surface">
@@ -417,6 +427,7 @@ export default function Home() {
 
           <div className="capability-grid">
             <Capability label="Reasoning" active={capability("reasoning")} />
+            <Capability label="Voice intake" active={capability("voice_intake")} />
             <Capability label="Nurse call" active={capability("nurse_call")} />
             <Capability label="Patient check-in" active={capability("patient_checkin")} />
             <Capability label="Camera" active={camOk} />
