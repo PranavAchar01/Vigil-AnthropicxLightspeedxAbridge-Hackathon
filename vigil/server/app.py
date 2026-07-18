@@ -19,6 +19,7 @@ import logging
 import threading
 import time
 from contextlib import asynccontextmanager
+from dataclasses import replace
 from pathlib import Path
 
 from fastapi import FastAPI, Header, HTTPException, Request, WebSocket, WebSocketDisconnect
@@ -27,6 +28,7 @@ from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, Streamin
 
 from vigil.chart import PatientChart, load_cohort
 from vigil.config import settings
+from vigil.demo import DemoController
 from vigil.documentation import abridge_note
 from vigil.escalation.elevenlabs_call import (
     NurseCallHandler,
@@ -35,13 +37,17 @@ from vigil.escalation.elevenlabs_call import (
 )
 from vigil.escalation.ladder import run_ladder
 from vigil.escalation.twilio_call import twilio_call_configured
-from vigil.events import BusEvent, FusedEvent, PerceptionEvent
+from vigil.events import BusEvent, EscalationAction, FusedEvent, PerceptionEvent
+from vigil.monitoring import MonitorRegistry
 from vigil.perception.fusion import EventFuser
 from vigil.reasoning import triage
+from vigil.reasoning.rules import decide_tier_zero
 from vigil.reasoning.triage import ReasoningNotConfigured
+from vigil.security import AuditChain, BreakGlassManager
 from vigil.server import status as pstatus
 from vigil.server import supabase_sink as supa
 from vigil.server.bus import EventBus, FrameBuffer
+from vigil.server.command_api import build_command_router
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(name)s %(message)s")
 log = logging.getLogger("vigil.server")
@@ -53,6 +59,10 @@ FONTS = DASHBOARD_DIR / "fonts.css"
 bus = EventBus()
 frames = FrameBuffer()
 fuser = EventFuser(window_s=settings.fusion_window_seconds)
+registry = MonitorRegistry(fusion_window_s=settings.fusion_window_seconds)
+audit = AuditChain()
+break_glass = BreakGlassManager()
+demo = DemoController(registry, audit, bus.publish)
 
 
 class State:
@@ -94,6 +104,10 @@ def _capabilities() -> dict[str, bool]:
         "patient_checkin": checkin_configured(),
         "cohort_loaded": bool(state.charts),
         "backend": supa.configured(),
+        "multi_patient": True,
+        "role_redaction": True,
+        "audit_chain": True,
+        "demo_replay": True,
     }
 
 
@@ -139,9 +153,25 @@ def _on_perception(ev: PerceptionEvent) -> None:
     bus.publish(BusEvent(type="perception", payload=ev.model_dump()))
     if ev.kind in ("fall", "collapse", "scream") and state.active_id:
         pstatus.mark_event(state.active_id, ev.kind)
-    fused = fuser.add(ev)
-    if fused is not None:
-        asyncio.create_task(handle_incident(fused))
+    # Route by persistent track binding. The first live track inherits the
+    # currently recognized patient, then remains independent of later changes.
+    binding = registry.binding(ev.track_id, now=ev.ts)
+    if binding is None and state.active_id:
+        registry.bind_track(ev.track_id, state.active_id, confidence=0.5, now=ev.ts)
+    result = registry.ingest(ev)
+    if result.patient_id and result.fused is not None:
+        asyncio.create_task(handle_incident(result.fused, result.patient_id))
+    elif result.safety_only and result.fused is not None:
+        bus.publish(
+            BusEvent(
+                type="safety_alert",
+                payload={
+                    "track_id": ev.track_id,
+                    "summary": result.fused.summary,
+                    "clinical_context": None,
+                },
+            )
+        )
 
 
 async def _stream_text(kind: str, text: str, delay: float = 0.025) -> None:
@@ -150,8 +180,8 @@ async def _stream_text(kind: str, text: str, delay: float = 0.025) -> None:
         await asyncio.sleep(delay)
 
 
-async def handle_incident(fused: FusedEvent) -> None:
-    chart = _active()
+async def handle_incident(fused: FusedEvent, patient_id: str | None = None) -> None:
+    chart = state.charts.get(patient_id or "") or _active()
     if chart is None:
         log.warning("incident with no active patient; ignoring")
         return
@@ -168,23 +198,39 @@ async def handle_incident(fused: FusedEvent) -> None:
         )
     )
 
-    try:
-        decision = await asyncio.to_thread(triage.decide, chart, fused)
-    except ReasoningNotConfigured as e:
-        log.error("%s", e)
-        bus.publish(
-            BusEvent(
-                type="status",
-                payload={
-                    "level": "error",
-                    "message": "Set ANTHROPIC_API_KEY to enable re-triage reasoning.",
-                },
-            )
-        )
+    monitor = registry.monitor(chart.patient_id)
+    if monitor is None:
+        log.warning("incident for patient without monitor state: %s", chart.patient_id)
         return
+    if settings.anthropic_api_key:
+        # The optional Tier 1 call receives the current monotonic ESI, not the
+        # original arrival value.
+        current_chart = replace(chart, baseline_esi=monitor.current_esi)
+        try:
+            decision = await asyncio.to_thread(triage.decide, current_chart, fused)
+        except ReasoningNotConfigured:
+            decision = decide_tier_zero(chart, monitor, fused)
+    else:
+        decision = decide_tier_zero(chart, monitor, fused)
 
     await _stream_text("reasoning_delta", decision.rationale)
     bus.publish(BusEvent(type="decision", payload=decision.model_dump()))
+    registry.apply_decision(decision)
+    alert = registry.create_or_update_alert(decision, fused)
+    bus.publish(BusEvent(type="alert", payload=alert.model_dump(mode="json")))
+    audit.append(
+        actor=f"vigil-{decision.reasoning_tier}",
+        role="system",
+        action="retriage_decision",
+        resource=f"patient:{chart.patient_id}",
+        outcome="escalated" if decision.escalate else "held",
+        metadata={
+            "patient_id": chart.patient_id,
+            "prior_esi": decision.prior_esi,
+            "new_esi": decision.new_esi,
+            "input_snapshot_hash": decision.input_snapshot_hash,
+        },
+    )
     # record for the voice agent's get_patient_status tool (pre-computed; never in the call path)
     pstatus.update_retriage(
         chart.patient_id,
@@ -195,8 +241,19 @@ async def handle_incident(fused: FusedEvent) -> None:
         chart.to_context(),
     )
 
-    handler = NurseCallHandler(chart, bus=bus)
-    actions = await asyncio.to_thread(run_ladder, decision, handler)
+    if nurse_call_configured() or twilio_call_configured() or checkin_configured():
+        handler = NurseCallHandler(chart, bus=bus)
+        actions = await asyncio.to_thread(run_ladder, decision, handler)
+    else:
+        kind = "nurse_call" if decision.action.value == "page_immediately" else "patient_checkin"
+        actions = [
+            EscalationAction(
+                kind=kind,
+                target="charge_nurse" if kind == "nurse_call" else "patient_kiosk",
+                message=decision.spoken_summary,
+                status="pending",
+            )
+        ]
     for a in actions:
         bus.publish(BusEvent(type="escalation", payload=a.model_dump()))
 
@@ -265,6 +322,10 @@ async def lifespan(app: FastAPI):
     bus.bind_loop(loop)
     bus.set_tap(_mirror)  # mirror every event into the Supabase backend
     _load_cohort()
+    demo.reset()
+    state.charts.update(demo.charts)
+    if not state.active_id and demo.charts:
+        state.active_id = next(iter(demo.charts))
 
     def sink(ev: PerceptionEvent) -> None:  # called from perception threads
         loop.call_soon_threadsafe(_on_perception, ev)
@@ -282,6 +343,7 @@ async def lifespan(app: FastAPI):
 
 
 app = FastAPI(title="Vigil", lifespan=lifespan)
+app.include_router(build_command_router(registry, audit, break_glass, demo, bus))
 
 # Allow the Vercel command-center frontend (and any dashboard origin) to read the
 # open endpoints cross-origin. Token-guarded routes stay protected by the header.

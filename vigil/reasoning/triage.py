@@ -66,7 +66,10 @@ def _finalize(raw: dict, chart: PatientChart) -> TriageDecision:
     elif new_esi == 3 and action == "hold":
         action = "voice_checkin"
     # 3) escalate is DERIVED, not trusted.
-    escalate = new_esi < prior or action == "page_immediately"
+    # Any check-in or page action must reach the ladder. Previously, a soft
+    # signal with an unchanged ESI produced voice_checkin but was discarded
+    # because `escalate` was false.
+    escalate = new_esi < prior or action != "hold"
     return TriageDecision(
         patient_id=chart.patient_id,
         prior_esi=prior,

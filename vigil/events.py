@@ -35,7 +35,18 @@ class Action(str, Enum):
 
 # Discrete signals the perception layer can raise.
 PerceptionKind = Literal[
-    "fall", "collapse", "scream", "motionless", "slump", "agitation", "chest_clutch"
+    "fall",
+    "collapse",
+    "scream",
+    "motionless",
+    "slump",
+    "agitation",
+    "chest_clutch",
+    "gait_instability",
+    "labored_breathing",
+    "distress_phrase",
+    "non_response",
+    "companion_alarm",
 ]
 
 
@@ -71,6 +82,10 @@ class TriageDecision(BaseModel):
     action: Action
     rationale: str  # cites the chart; shown in the reasoning trace
     spoken_summary: str  # <=10s of speech; what ElevenLabs says to the nurse
+    confidence: float = Field(default=0.0, ge=0.0, le=1.0)
+    evidence: list[str] = Field(default_factory=list)
+    input_snapshot_hash: str = ""
+    reasoning_tier: Literal["tier_0", "tier_1", "fail_safe"] = "tier_1"
 
     def is_monotonic(self) -> bool:
         """ESI 1 is most acute, 5 least. Escalation must never raise the number."""

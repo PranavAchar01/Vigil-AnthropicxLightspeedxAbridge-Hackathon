@@ -13,9 +13,18 @@ from collections import deque
 from vigil.events import FusedEvent, PerceptionEvent, PerceptionKind, Severity
 
 # Signals that, on their own, already warrant a hard (page-now) response.
-HARD_ALONE: set[PerceptionKind] = {"fall", "collapse"}
+HARD_ALONE: set[PerceptionKind] = {"fall", "collapse", "companion_alarm"}
 # Signals that are ambiguous alone → voice check-in first.
-SOFT_ALONE: set[PerceptionKind] = {"motionless", "slump", "agitation"}
+SOFT_ALONE: set[PerceptionKind] = {
+    "motionless",
+    "slump",
+    "agitation",
+    "chest_clutch",
+    "gait_instability",
+    "labored_breathing",
+    "distress_phrase",
+    "non_response",
+}
 
 
 class EventFuser:
@@ -72,6 +81,23 @@ class EventFuser:
         has_fall = "fall" in kinds
         has_collapse = "collapse" in kinds
         has_scream = "scream" in kinds
+        if "companion_alarm" in kinds:
+            return Severity.HARD, ["companion_alarm"], "Companion requested urgent help"
+
+        visual_soft = kinds.intersection(
+            {"motionless", "slump", "agitation", "chest_clutch", "gait_instability"}
+        )
+        audio_soft = kinds.intersection({"labored_breathing", "distress_phrase", "non_response"})
+        if visual_soft and audio_soft:
+            fused = [next(iter(visual_soft)), next(iter(audio_soft))]
+            return Severity.HARD, fused, "Corroborated visual and audio deterioration"
+
+        if "non_response" in kinds and ("scream" in kinds or "labored_breathing" in kinds):
+            fused = [
+                "non_response",
+                "labored_breathing" if "labored_breathing" in kinds else "scream",
+            ]
+            return Severity.HARD, fused, "Distress signal followed by no response"
         down = has_fall or has_collapse
         down_kind: PerceptionKind = "collapse" if has_collapse else "fall"
 
@@ -92,6 +118,11 @@ class EventFuser:
                 "motionless": "Prolonged motionlessness",
                 "slump": "Posture degraded / slumping",
                 "agitation": "Agitation / pacing",
+                "chest_clutch": "Repeated guarding at the chest",
+                "gait_instability": "Gait instability detected",
+                "labored_breathing": "Possible labored breathing",
+                "distress_phrase": "Patient reported worsening symptoms",
+                "non_response": "No response to directed check-in",
             }
             primary = soft[0]
             return Severity.SOFT, [primary], label[primary]

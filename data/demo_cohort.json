@@ -1,0 +1,83 @@
+[
+  {
+    "patient_id": "demo-vega",
+    "encounter_id": "enc-vega",
+    "name": "Maria Vega",
+    "gender": "female",
+    "age": 67,
+    "visit_title": "Chest pressure and shortness of breath",
+    "active_conditions": [
+      "Coronary artery disease",
+      "Hypertension"
+    ],
+    "active_medications": [
+      "Apixaban 5 mg oral tablet",
+      "Metoprolol 50 mg oral tablet"
+    ],
+    "latest_vitals": {
+      "heart_rate": {
+        "label": "heart_rate",
+        "value": 108,
+        "unit": "/min",
+        "at": "2026-07-18T18:10:00Z"
+      },
+      "spo2": {
+        "label": "spo2",
+        "value": 91,
+        "unit": "%",
+        "at": "2026-07-18T18:10:00Z"
+      }
+    },
+    "baseline_esi": 3
+  },
+  {
+    "patient_id": "demo-idris",
+    "encounter_id": "enc-idris",
+    "name": "Idris Cole",
+    "gender": "male",
+    "age": 54,
+    "visit_title": "Abdominal pain and dizziness",
+    "active_conditions": [
+      "Type 2 diabetes mellitus",
+      "Chronic kidney disease"
+    ],
+    "active_medications": [
+      "Insulin glargine",
+      "Lisinopril 10 mg oral tablet"
+    ],
+    "latest_vitals": {
+      "heart_rate": {
+        "label": "heart_rate",
+        "value": 96,
+        "unit": "/min",
+        "at": "2026-07-18T18:25:00Z"
+      },
+      "systolic_bp": {
+        "label": "systolic_bp",
+        "value": 102,
+        "unit": "mmHg",
+        "at": "2026-07-18T18:25:00Z"
+      }
+    },
+    "baseline_esi": 4
+  },
+  {
+    "patient_id": "demo-park",
+    "encounter_id": "enc-park",
+    "name": "Jordan Park",
+    "gender": "nonbinary",
+    "age": 29,
+    "visit_title": "Ankle injury after a fall",
+    "active_conditions": [],
+    "active_medications": [],
+    "latest_vitals": {
+      "heart_rate": {
+        "label": "heart_rate",
+        "value": 78,
+        "unit": "/min",
+        "at": "2026-07-18T18:42:00Z"
+      }
+    },
+    "baseline_esi": 4
+  }
+]

@@ -270,7 +270,7 @@ def test_incident_bundle_is_valid_transaction():
     )
     b = build_incident_bundle(inc)
     assert b["type"] == "transaction"
-    assert len(b["entry"]) == 7
+    assert len(b["entry"]) == 8
     types = [e["resource"]["resourceType"] for e in b["entry"]]
     assert types == [
         "Encounter",
@@ -280,6 +280,7 @@ def test_incident_bundle_is_valid_transaction():
         "DocumentReference",
         "Flag",
         "Communication",
+        "Provenance",
     ]
     enc = b["entry"][0]["resource"]
     assert enc["class"]["code"] == "EMER"  # R4: single Coding, not array
@@ -292,3 +293,7 @@ def test_incident_bundle_is_valid_transaction():
     for e in b["entry"]:
         assert e["fullUrl"].startswith("urn:uuid:")
         assert e["request"]["method"] == "POST"
+    provenance = b["entry"][7]["resource"]
+    assert provenance["resourceType"] == "Provenance"
+    assert len(provenance["target"]) == 4
+    assert len(provenance["entity"]) == 2

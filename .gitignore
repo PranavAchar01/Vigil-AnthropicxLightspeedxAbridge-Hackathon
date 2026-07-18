@@ -31,5 +31,6 @@ recordings/
 # runtime incident bundles (regenerated per run)
 data/incidents/
 
-# Abridge-provided synthetic data (regenerate via scripts/extract_demo_cohort.py)
-data/demo_cohort.json
+# Large extracted Abridge cohorts stay local. The small repository cohort is
+# hand-authored synthetic demo data and is intentionally committed.
+data/extracted_demo_cohort.json

@@ -235,10 +235,27 @@ def build_nurse_communication(inc: Incident, enc: str, about: list[str]) -> dict
     }
 
 
+def build_provenance(inc: Incident, targets: list[str], sources: list[str]) -> dict:
+    """Link generated clinical assertions to the exact source observations."""
+    return {
+        "resourceType": "Provenance",
+        "recorded": _now(),
+        "target": [{"reference": ref} for ref in targets],
+        "agent": [
+            {
+                "type": {"text": "assembler"},
+                "who": {"reference": inc.device_ref, "display": "Vigil edge monitor"},
+            }
+        ],
+        "entity": [{"role": "source", "what": {"reference": ref}} for ref in sources],
+        "reason": [{"text": "Waiting-room re-triage incident documentation"}],
+    }
+
+
 def build_incident_bundle(inc: Incident) -> dict:
     enc = inc.encounter_urn
     acuity, event, flag = _urn(), _urn(), _urn()
-    soap, transcript, comm = _urn(), _urn(), _urn()
+    soap, transcript, comm, provenance = _urn(), _urn(), _urn(), _urn()
     entries = [
         (enc, build_encounter(inc), "Encounter"),
         (acuity, build_acuity_observation(inc, enc), "Observation"),
@@ -250,6 +267,15 @@ def build_incident_bundle(inc: Incident) -> dict:
             comm,
             build_nurse_communication(inc, enc, about=[flag, acuity, event, soap]),
             "Communication",
+        ),
+        (
+            provenance,
+            build_provenance(
+                inc,
+                targets=[acuity, soap, flag, comm],
+                sources=[event, transcript],
+            ),
+            "Provenance",
         ),
     ]
     return {
@@ -271,7 +297,7 @@ def _fallback_soap(chart: PatientChart, fused: FusedEvent, decision: TriageDecis
     vitals = ", ".join(f"{v.label} {v.value:g}{v.unit}" for v in chart.latest_vitals.values())
     conds = "; ".join(chart.active_conditions[:6]) or "none listed"
     return (
-        f"# Vigil Incident Note — {chart.name}\n\n"
+        f"# Vigil Incident Note: {chart.name}\n\n"
         f"**S:** Patient in waiting room for '{chart.visit_title}'. Vigil monitoring "
         f"detected {fused.summary.lower()} (signals: {', '.join(fused.kinds)}; "
         f"confidence {fused.confidence:g}).\n\n"
@@ -321,7 +347,7 @@ def _transcript(
     actions: list[EscalationAction],
 ) -> str:
     lines = [
-        f"[00:00] (Vigil) {fused.summary} — signals {', '.join(fused.kinds)}.",
+        f"[00:00] (Vigil) {fused.summary}; signals {', '.join(fused.kinds)}.",
         f"[00:01] (Vigil→Claude) Re-triage {chart.name}: ESI-{decision.prior_esi} → "
         f"ESI-{decision.new_esi}. {decision.rationale}",
     ]
