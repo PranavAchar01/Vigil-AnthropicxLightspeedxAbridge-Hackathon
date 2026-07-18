@@ -90,17 +90,17 @@ textarea {
 .role-control select {
   min-width: 126px;
   padding: 5px 25px 5px 9px;
-  border: 1px solid rgba(125, 226, 195, 0.16);
+  border: 1px solid rgba(108, 140, 255, 0.16);
   border-radius: 999px;
   outline: none;
   color: var(--text);
-  background: rgba(125, 226, 195, 0.08);
+  background: rgba(108, 140, 255, 0.08);
   font-size: 10px;
   font-weight: 620;
 }
 
 .role-control select:focus-visible {
-  box-shadow: 0 0 0 3px rgba(125, 226, 195, 0.14);
+  box-shadow: 0 0 0 3px rgba(108, 140, 255, 0.14);
 }
 
 .queue-board {
@@ -161,17 +161,17 @@ textarea {
 
 .demo-controls button:hover:not(:disabled),
 .alert-actions button:hover:not(:disabled) {
-  border-color: rgba(125, 226, 195, 0.3);
+  border-color: rgba(108, 140, 255, 0.3);
   color: var(--text);
-  background: rgba(125, 226, 195, 0.09);
+  background: rgba(108, 140, 255, 0.09);
   transform: translateY(-1px);
 }
 
 .demo-controls button.primary {
-  border-color: rgba(125, 226, 195, 0.27);
-  color: #06110e;
-  background: linear-gradient(135deg, var(--mint-bright), #6fcaae);
-  box-shadow: 0 8px 24px rgba(35, 146, 113, 0.2);
+  border-color: rgba(108, 140, 255, 0.27);
+  color: #ffffff;
+  background: linear-gradient(135deg, var(--accent-bright), #5d78df);
+  box-shadow: 0 8px 24px rgba(55, 80, 190, 0.2);
 }
 
 .demo-controls button:disabled,
@@ -192,17 +192,17 @@ textarea {
   display: block;
   height: 100%;
   border-radius: inherit;
-  background: var(--mint);
-  box-shadow: 0 0 12px rgba(125, 226, 195, 0.4);
+  background: var(--accent);
+  box-shadow: 0 0 12px rgba(108, 140, 255, 0.4);
   transition: width 350ms ease;
 }
 
 .source-pill {
   padding: 6px 9px;
-  border: 1px solid rgba(125, 226, 195, 0.12);
+  border: 1px solid rgba(108, 140, 255, 0.12);
   border-radius: 999px;
-  color: var(--mint);
-  background: rgba(125, 226, 195, 0.06);
+  color: var(--accent);
+  background: rgba(108, 140, 255, 0.06);
   font: 600 8px var(--mono);
   letter-spacing: 0.03em;
 }
@@ -233,8 +233,8 @@ textarea {
 
 .queue-card:hover,
 .queue-card.selected {
-  border-color: rgba(125, 226, 195, 0.24);
-  background: rgba(125, 226, 195, 0.065);
+  border-color: rgba(108, 140, 255, 0.24);
+  background: rgba(108, 140, 255, 0.065);
   transform: translateY(-1px);
 }
 
@@ -252,10 +252,10 @@ textarea {
   width: 38px;
   height: 38px;
   place-items: center;
-  border: 1px solid rgba(125, 226, 195, 0.13);
+  border: 1px solid rgba(108, 140, 255, 0.13);
   border-radius: 12px;
-  color: var(--mint);
-  background: rgba(125, 226, 195, 0.05);
+  color: var(--accent);
+  background: rgba(108, 140, 255, 0.05);
   font: 650 10px var(--mono);
 }
 
@@ -320,7 +320,7 @@ textarea {
   width: 5px;
   height: 5px;
   border-radius: 50%;
-  background: var(--mint);
+  background: var(--accent);
 }
 
 .queue-state.active {
@@ -1584,8 +1584,8 @@ textarea {
     135deg,
     transparent 0,
     transparent 14px,
-    rgba(125, 226, 195, 0.025) 14px,
-    rgba(125, 226, 195, 0.025) 15px
+    rgba(108, 140, 255, 0.025) 14px,
+    rgba(108, 140, 255, 0.025) 15px
   );
 }
 
@@ -1611,10 +1611,10 @@ textarea {
 .scope-boundary code {
   position: relative;
   padding: 6px 9px;
-  border: 1px solid rgba(125, 226, 195, 0.13);
+  border: 1px solid rgba(108, 140, 255, 0.13);
   border-radius: 8px;
-  color: var(--mint);
-  background: rgba(125, 226, 195, 0.05);
+  color: var(--accent);
+  background: rgba(108, 140, 255, 0.05);
   font: 9px var(--mono);
 }
 
@@ -1624,9 +1624,9 @@ textarea {
   width: 25px;
   height: 25px;
   margin-bottom: 14px;
-  border: 1px solid rgba(125, 226, 195, 0.28);
+  border: 1px solid rgba(108, 140, 255, 0.28);
   border-radius: 8px;
-  box-shadow: inset 0 0 0 7px rgba(125, 226, 195, 0.05);
+  box-shadow: inset 0 0 0 7px rgba(108, 140, 255, 0.05);
 }
 
 .response-panel {
@@ -1641,9 +1641,9 @@ textarea {
 }
 
 .alert-actions button:first-child {
-  border-color: rgba(125, 226, 195, 0.24);
-  color: var(--mint-bright);
-  background: rgba(125, 226, 195, 0.08);
+  border-color: rgba(108, 140, 255, 0.24);
+  color: var(--accent-bright);
+  background: rgba(108, 140, 255, 0.08);
 }
 
 .audit-section {
@@ -1668,7 +1668,7 @@ textarea {
 }
 
 .audit-row code {
-  color: var(--mint);
+  color: var(--accent);
   font: 8px var(--mono);
 }
 
