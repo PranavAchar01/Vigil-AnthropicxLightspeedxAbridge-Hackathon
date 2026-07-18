@@ -104,6 +104,13 @@ class Params:
     osc_amp: float = _f("VIGIL_SEIZURE_OSC_AMP", 0.05)  # peak amplitude (small-px/frame)
     osc_conc: float = _f("VIGIL_SEIZURE_OSC_CONC", 0.70)  # band peak / global peak
     osc_sustain_s: float = _f("VIGIL_SEIZURE_OSC_S", 1.2)  # sustained before firing
+    # mouth-open distress cry ("aaahh"): a WIDE-open mouth is a dark cavity below the
+    # nose. Score = dark-pixel fraction of a nose-anchored box, adaptive to face
+    # brightness. Measured on real footage: closed/talking never sustains >=0.20 for
+    # more than 0.1s; a wide-open mouth holds far above it. 0 disables.
+    mouth_seizure: float = _f("VIGIL_MOUTH_SEIZURE", 1.0)
+    mouth_open_frac: float = _f("VIGIL_MOUTH_OPEN_FRAC", 0.22)
+    mouth_sustain_s: float = _f("VIGIL_MOUTH_S", 0.4)
     # bookkeeping
     cooldown_s: float = _f("VIGIL_COOLDOWN_S", 6.0)
     unresponsive_cooldown_s: float = _f("VIGIL_UNRESPONSIVE_COOLDOWN_S", 15.0)
@@ -152,6 +159,7 @@ class PersonState:
     slump_since: float = 0.0
     tremor_since: float = 0.0
     osc_since: float = 0.0  # spectral-oscillation seizure accumulator
+    mouth_since: float = 0.0  # mouth-open distress-cry accumulator
     upright_since: float = 0.0  # first frame of continuous upright evidence while down
     last_drop_ts: float = -1e9
     last_emit: dict = field(default_factory=dict)
@@ -273,12 +281,62 @@ class VisionDetector:
             self._prev_small = None
             self._flow_hist.clear()
             self.st.osc_since = 0.0
+            self.st.mouth_since = 0.0
             return res
         box, kp, kc = person
         self.analyze(box, kp, kc, H, ts)
         self._tremor(frame, box, ts)
         self._flow_osc(frame, box, ts)
+        self._mouth(frame, kp, kc, ts)
         return res
+
+    def _mouth(self, frame, kp, kc, ts: float) -> None:
+        """Mouth-open distress cry: a WIDE-open mouth ("aaahh") reads as a large dark
+        cavity in a nose-anchored box, relative to the face's own brightness. Fires
+        'seizure' when sustained — an unmistakable, deliberate distress signal for
+        the demo. Pixel work here; decision in _mouth_step."""
+        p = self.p
+        if not p.mouth_seizure:
+            return
+        if kc[NOSE] < p.kp_conf or kc[L_EYE] < p.kp_conf or kc[R_EYE] < p.kp_conf:
+            self.st.mouth_since = 0.0
+            return
+        nx, ny = kp[NOSE]
+        d = float(np.hypot(*(kp[L_EYE] - kp[R_EYE])))
+        if d < 8:  # face too small to read a mouth
+            self.st.mouth_since = 0.0
+            return
+        Hf, Wf = frame.shape[0], frame.shape[1]
+        x1, x2 = max(int(nx - 0.9 * d), 0), min(int(nx + 0.9 * d), Wf)
+        y1, y2 = max(int(ny + 0.35 * d), 0), min(int(ny + 1.7 * d), Hf)
+        fy1 = max(int(ny - 0.6 * d), 0)
+        fy2 = max(int(ny + 0.1 * d), fy1 + 4)
+        if x2 - x1 < 6 or y2 - y1 < 6:
+            self.st.mouth_since = 0.0
+            return
+
+        def luma(region):
+            return (
+                0.114 * region[:, :, 0] + 0.587 * region[:, :, 1] + 0.299 * region[:, :, 2]
+            ).astype(np.float32)
+
+        roi = luma(frame[y1:y2, x1:x2])
+        face = luma(frame[fy1:min(fy2, Hf), x1:x2])
+        ref = float(np.median(face)) if face.size else float(np.median(roi))
+        score = float((roi < 0.55 * ref).mean())
+        self._mouth_step(score, ts)
+
+    def _mouth_step(self, score: float, ts: float) -> None:
+        """Pure decision on the mouth-open score (split for offline replay/tests)."""
+        p = self.p
+        self.metrics["mouth"] = round(score, 3)
+        recent_fall = ts - self.st.last_drop_ts < 6.0  # occluded face mid-fall glitches
+        if score >= p.mouth_open_frac and not recent_fall:
+            self.st.mouth_since = self.st.mouth_since or ts
+            if ts - self.st.mouth_since >= p.mouth_sustain_s:
+                self._fire(ts, "seizure", 0.9, "SEIZURE DETECTED — distress cry")
+        else:
+            self.st.mouth_since = 0.0
 
     def _flow_osc(self, frame, box, ts: float) -> None:
         """Signed person-vs-background optical flow (camera shake cancels), feeding
@@ -617,6 +675,7 @@ class VisionDetector:
                 f"motion  {m.get('motion', 0):.2f} sw/s  ({m.get('posture', '—')})",
                 f"drop    {m.get('drop', 0):.2f}   vy {m.get('vy', 0):+.2f}",
                 f"seizure reversals {m.get('reversals', 0)}",
+                f"mouth   {m.get('mouth', 0):.2f}  (cry >= {self.p.mouth_open_frac:g})",
                 f"still   {m.get('still_s', 0):.1f}s",
             ]
             if m.get("present")
