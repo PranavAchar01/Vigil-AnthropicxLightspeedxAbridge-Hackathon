@@ -23,7 +23,13 @@ from pathlib import Path
 
 from fastapi import FastAPI, Header, HTTPException, Request, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, StreamingResponse
+from fastapi.responses import (
+    FileResponse,
+    HTMLResponse,
+    JSONResponse,
+    Response,
+    StreamingResponse,
+)
 
 from vigil.chart import PatientChart, load_cohort
 from vigil.config import settings
@@ -34,6 +40,7 @@ from vigil.escalation.elevenlabs_call import (
     nurse_call_configured,
 )
 from vigil.escalation.ladder import run_ladder
+from vigil.escalation.openai_realtime import realtime_call_configured, run_bridge
 from vigil.escalation.twilio_call import twilio_call_configured
 from vigil.events import BusEvent, FusedEvent, PerceptionEvent
 from vigil.perception.fusion import EventFuser
@@ -118,8 +125,11 @@ def _avatar_for(patient_id: str) -> str | None:
 def _capabilities() -> dict[str, bool]:
     return {
         "reasoning": bool(settings.anthropic_api_key),
-        "nurse_call": nurse_call_configured() or twilio_call_configured(),
-        "patient_checkin": checkin_configured(),
+        "nurse_call": (
+            realtime_call_configured() or nurse_call_configured() or twilio_call_configured()
+        ),
+        "patient_checkin": checkin_configured() or realtime_call_configured(),
+        "voice_agent": realtime_call_configured(),  # real back-and-forth (OpenAI Realtime)
         "cohort_loaded": bool(state.charts),
         "backend": supa.configured(),
         "fall_model": settings.fall_model_path.exists(),
@@ -403,6 +413,43 @@ async def pause_toggle():
     paused = state.pause.is_set()
     bus.publish(BusEvent(type="paused", payload={"paused": paused}))
     return {"paused": paused}
+
+
+# --------------------------------------------------------------------------- #
+# OpenAI-Realtime voice bridge: Twilio fetches the TwiML, then connects a
+# bidirectional media stream that we bridge to the Realtime API.
+# --------------------------------------------------------------------------- #
+@app.api_route("/twiml/{context_id}", methods=["GET", "POST"])
+async def twiml(context_id: str):
+    """TwiML Twilio fetches when the bridged call connects — opens the media stream."""
+    from vigil.escalation.openai_realtime import build_twiml
+
+    return Response(content=build_twiml(context_id), media_type="application/xml")
+
+
+@app.websocket("/media-stream/{context_id}")
+async def media_stream(ws: WebSocket, context_id: str):
+    """Twilio's bidirectional audio stream <-> OpenAI Realtime. Live transcript turns
+    are mirrored to the dashboard + Supabase; get_patient_status returns real status."""
+    await ws.accept()
+
+    def on_turn(role: str, text: str) -> None:
+        bus.publish_from_thread(
+            BusEvent(type="conversation", payload={"role": role, "text": text})
+        )
+        chart = _active()
+        supa.log_event(
+            "conversation_turn",
+            source="realtime",
+            patient=chart.name if chart else None,
+            summary=f"{role}: {text[:120]}",
+            payload={"role": role, "text": text},
+        )
+
+    def live_status() -> dict:
+        return pstatus.snapshot(state.active_id or "unknown")
+
+    await run_bridge(ws, context_id, on_turn=on_turn, live_status=live_status)
 
 
 @app.get("/faces/{patient_id}.jpg")

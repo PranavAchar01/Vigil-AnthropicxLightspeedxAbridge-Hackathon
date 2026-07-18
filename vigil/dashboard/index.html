@@ -314,6 +314,10 @@ function handle(ev){
     else if(s==="patient_checkin") setBanner("Voice check-in",true);
     logItem(`<b>call</b> ${s} <span class="faint">${p.message||p.conversation_id||p.error||""}</span>`);
   }
+  else if(type==="conversation"){
+    const who = p.role==="agent" ? "Vigil" : (p.role||"caller");
+    logItem(`<b>${who}</b> <span class="faint">${(p.text||"").slice(0,180)}</span>`);
+  }
   else if(type==="escalation") logItem(`<b>${p.kind.replace(/_/g," ")}</b> → ${p.status} <span class="faint">${p.message||""}</span>`);
   else if(type==="note"){ noteEl.textContent=p.text; $("bundle").textContent="FHIR ✓ "+(p.bundle_path||"").split("/").pop(); }
 }

@@ -42,6 +42,18 @@ class Settings:
         default_factory=lambda: _env("VIGIL_FAST_MODEL", "claude-haiku-4-5-20251001")
     )
 
+    # --- OpenAI Realtime (speech-to-speech voice agent on the phone call) ---
+    # A real back-and-forth conversation: Twilio Media Streams (mu-law 8kHz) are
+    # bridged to the OpenAI Realtime API, which speaks mu-law natively (no transcode).
+    # Preferred over the ElevenLabs/one-shot-TTS paths when configured.
+    openai_api_key: str = field(default_factory=lambda: _env("OPENAI_API_KEY"))
+    openai_realtime_model: str = field(
+        default_factory=lambda: _env("OPENAI_REALTIME_MODEL", "gpt-realtime")
+    )
+    openai_realtime_voice: str = field(
+        default_factory=lambda: _env("OPENAI_REALTIME_VOICE", "alloy")
+    )
+
     # --- ElevenLabs ---
     elevenlabs_api_key: str = field(default_factory=lambda: _env("ELEVENLABS_API_KEY"))
     elevenlabs_agent_id: str = field(default_factory=lambda: _env("ELEVENLABS_AGENT_ID"))
