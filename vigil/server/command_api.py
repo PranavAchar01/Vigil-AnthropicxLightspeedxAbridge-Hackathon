@@ -48,6 +48,12 @@ class OverrideRequest(BaseModel):
     new_esi: int = Field(ge=1, le=5)
 
 
+class AssistRequest(BaseModel):
+    actor: str = Field(default="Front desk", min_length=2, max_length=80)
+    seat: str = Field(min_length=1, max_length=12)
+    reason: str = Field(default="Patient or companion requested clinical help", min_length=8, max_length=160)
+
+
 class ReplayRequest(BaseModel):
     interval_seconds: float = Field(default=1.1, ge=0.15, le=10)
 
@@ -279,12 +285,44 @@ def build_command_router(
         )
         return monitor
 
+    @router.post("/operations/medical-assist")
+    async def request_medical_assist(
+        request: AssistRequest,
+        x_vigil_role: str = Header(default=Role.FRONT_DESK.value),
+    ):
+        role = role_from_header(x_vigil_role)
+        if not has_scope(role, "operations:assist"):
+            raise HTTPException(status_code=403, detail="operations:assist scope required")
+        try:
+            alert = registry.request_medical_assist(request.seat, request.actor)
+        except KeyError as exc:
+            raise HTTPException(status_code=404, detail="unknown waiting-room seat") from exc
+        audit.append(
+            actor=request.actor,
+            role=role,
+            action="medical_assist_request",
+            resource=f"patient:{alert.patient_id}",
+            outcome="routed",
+            reason=request.reason,
+            metadata={"seat": request.seat, "alert_id": alert.alert_id},
+        )
+        payload = {
+            "action_id": alert.alert_id,
+            "seat": request.seat,
+            "state": "page_pending",
+            "routed_to": "charge_nurse",
+        }
+        bus.publish(BusEvent(type="medical_assist_requested", payload=payload))
+        return payload
+
     @router.post("/break-glass")
     async def create_break_glass(
         request: BreakGlassRequest,
         x_vigil_role: str = Header(default=Role.CHARGE_NURSE.value),
     ):
         role = role_from_header(x_vigil_role)
+        if not has_scope(role, "break_glass:grant"):
+            raise HTTPException(status_code=403, detail="break_glass:grant scope required")
         try:
             grant = break_glass.grant(request.actor, request.patient_id, request.reason)
         except ValueError as exc:

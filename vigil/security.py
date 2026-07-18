@@ -27,12 +27,23 @@ class Role(str, Enum):
 
 ROLE_SCOPES: dict[Role, frozenset[str]] = {
     Role.CHARGE_NURSE: frozenset(
-        {"video:view", "chart:read", "reason:read", "escalate:ack", "esi:override", "queue:read"}
+        {
+            "video:view",
+            "chart:read",
+            "reason:read",
+            "escalate:ack",
+            "esi:override",
+            "queue:read",
+            "break_glass:grant",
+            "operations:assist",
+        }
     ),
-    Role.ATTENDING: frozenset({"chart:read", "reason:read", "esi:override", "queue:read"}),
-    Role.TRIAGE_NURSE: frozenset({"chart:read", "queue:read"}),
-    Role.FRONT_DESK: frozenset({"queue:read:limited"}),
-    Role.SECURITY: frozenset({"alert:read:nonclinical"}),
+    Role.ATTENDING: frozenset(
+        {"chart:read", "reason:read", "esi:override", "queue:read", "break_glass:grant"}
+    ),
+    Role.TRIAGE_NURSE: frozenset({"chart:read", "queue:read", "operations:assist"}),
+    Role.FRONT_DESK: frozenset({"queue:read:limited", "operations:assist"}),
+    Role.SECURITY: frozenset({"alert:read:nonclinical", "operations:assist"}),
     Role.COMPLIANCE: frozenset({"audit:read"}),
 }
 

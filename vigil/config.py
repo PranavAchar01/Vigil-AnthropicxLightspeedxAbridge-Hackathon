@@ -28,6 +28,13 @@ def _envf(name: str, default: float) -> float:
         return default
 
 
+def _envb(name: str, default: bool) -> bool:
+    value = os.environ.get(name)
+    if value is None:
+        return default
+    return value.strip().lower() not in {"0", "false", "no", "off"}
+
+
 @dataclass(frozen=True)
 class Settings:
     # --- Claude ---
@@ -95,6 +102,9 @@ class Settings:
     )
 
     # --- Perception tuning ---
+    perception_enabled: bool = field(
+        default_factory=lambda: _envb("VIGIL_PERCEPTION_ENABLED", True)
+    )
     # A fall is only confirmed after the person stays down this long (debounce).
     fall_confirm_seconds: float = field(
         default_factory=lambda: _envf("VIGIL_FALL_CONFIRM_SECONDS", 1.0)

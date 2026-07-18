@@ -2,6 +2,11 @@
 
 from __future__ import annotations
 
+import asyncio
+
+import httpx
+from fastapi import FastAPI
+
 from vigil.chart import PatientChart, Vital
 from vigil.demo import DemoController, seed_demo
 from vigil.events import Action, BusEvent, Modality, PerceptionEvent, Severity
@@ -19,6 +24,8 @@ from vigil.security import (
     Role,
     queue_item_for_role,
 )
+from vigil.server.bus import EventBus
+from vigil.server.command_api import build_command_router
 
 
 def chart(pid: str, name: str, esi: int = 3, meds: list[str] | None = None) -> PatientChart:
@@ -129,6 +136,21 @@ def test_monotonic_override_rejects_lower_urgency():
         raise AssertionError("de-escalation should be rejected")
 
 
+def test_operations_assist_enters_clinical_queue_without_changing_esi():
+    registry = MonitorRegistry()
+    registry.add_chart(
+        chart("p1", "Maria", esi=3),
+        consent=ConsentRecord(),
+        seat="A3",
+    )
+    alert = registry.request_medical_assist("a3", "Front desk")
+    monitor = registry.monitor("p1")
+    assert alert.state == EscalationState.PAGE_PENDING
+    assert alert.current_esi == 3
+    assert monitor.current_esi == 3
+    assert monitor.escalation_state == EscalationState.PAGE_PENDING
+
+
 def test_tier_zero_uses_chart_risk_and_snapshot_hash():
     registry = registry_with_two()
     result = registry.ingest(
@@ -231,3 +253,71 @@ def test_seed_demo_has_three_bound_patients():
     assert set(charts) == {"demo-vega", "demo-idris", "demo-park"}
     assert len(registry.monitors()) == 3
     assert all(registry.binding(track).state == BindingState.BOUND for track in (101, 102, 103))
+
+
+def test_role_grouped_dashboard_actions_share_backend_state():
+    registry = MonitorRegistry()
+    audit = AuditChain()
+    break_glass = BreakGlassManager()
+    bus = EventBus()
+    demo = DemoController(registry, audit, bus.publish)
+    demo.reset()
+    app = FastAPI()
+    app.include_router(build_command_router(registry, audit, break_glass, demo, bus))
+
+    async def scenario() -> None:
+        transport = httpx.ASGITransport(app=app)
+        async with httpx.AsyncClient(transport=transport, base_url="http://vigil.test") as client:
+            assist = await client.post(
+                "/api/v1/operations/medical-assist",
+                headers={"X-Vigil-Role": "front_desk"},
+                json={
+                    "actor": "Front desk",
+                    "seat": "B1",
+                    "reason": "Patient or companion requested clinical help",
+                },
+            )
+            assert assist.status_code == 200
+            assert assist.json()["routed_to"] == "charge_nurse"
+
+            security_response = await client.get(
+                "/api/v1/session", headers={"X-Vigil-Role": "security"}
+            )
+            security = security_response.json()
+            b1 = next(item for item in security["queue"] if item["seat"] == "B1")
+            assert b1["medical_assist_needed"] is True
+            assert "name" not in b1 and "current_esi" not in b1
+
+            denied = await client.post(
+                "/api/v1/break-glass",
+                headers={"X-Vigil-Role": "compliance"},
+                json={
+                    "actor": "Compliance demo",
+                    "patient_id": "demo-vega",
+                    "reason": "Patient collapsed outside assigned clinical unit",
+                },
+            )
+            assert denied.status_code == 403
+
+            granted = await client.post(
+                "/api/v1/break-glass",
+                headers={"X-Vigil-Role": "charge_nurse"},
+                json={
+                    "actor": "Charge RN demo",
+                    "patient_id": "demo-vega",
+                    "reason": "Patient collapsed outside assigned clinical unit",
+                },
+            )
+            assert granted.status_code == 200
+
+            compliance_response = await client.get(
+                "/api/v1/session", headers={"X-Vigil-Role": "compliance"}
+            )
+            compliance = compliance_response.json()
+            emergency = next(
+                block for block in compliance["audit"] if block["action"] == "break_glass"
+            )
+            assert emergency["resource"].startswith("patient:pt_")
+            assert "demo-vega" not in str(emergency)
+
+    asyncio.run(scenario())

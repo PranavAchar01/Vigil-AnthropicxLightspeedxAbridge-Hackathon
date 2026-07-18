@@ -216,6 +216,8 @@ Implemented today:
 - SOAP note generation and an eight-resource FHIR transaction bundle with Provenance;
 - a local live dashboard plus a Next.js command center for patient context,
   perception, reasoning, escalation, and documentation;
+- a judge overview plus three role-grouped dashboards for clinical response,
+  waiting-room operations, and trust and audit;
 - a deterministic stage replay that works even when the camera or edge tunnel is unavailable;
 - optional Supabase event mirroring for remote observability;
 - offline tests for safety policy, role redaction, audit integrity, identity binding,
@@ -311,6 +313,7 @@ tests/
 - `POST /api/v1/alerts/{id}/feedback` — record confirmed or false alarm feedback
 - `POST /api/v1/tracks/{id}/bind` — consent-aware manual track correction
 - `POST /api/v1/patients/{id}/esi` — monotonic clinician urgency override
+- `POST /api/v1/operations/medical-assist` — route a seat-level request into the clinical queue
 - `POST /api/v1/intake` — apply deterministic ESI floors and monitoring watch lists
 - `POST /api/v1/break-glass` — issue an audited 15-minute emergency grant
 - `GET /api/v1/audit/verify` — verify the complete hash chain
@@ -377,7 +380,30 @@ Start Vigil:
 uv run uvicorn vigil.server.app:app --port 8000
 ```
 
+For a replay-only dashboard or cloud backend with no camera and microphone:
+
+```bash
+VIGIL_PERCEPTION_ENABLED=0 uv run uvicorn vigil.server.app:app --port 8000
+```
+
 Open <http://localhost:8000>.
+
+Start the Next.js judge experience in a second terminal:
+
+```bash
+corepack pnpm --dir web dev
+```
+
+Open the four product routes:
+
+- <http://localhost:3000/> — judge overview and system story
+- <http://localhost:3000/clinical> — charge nurse, triage, and attending command center
+- <http://localhost:3000/operations> — front desk and security coordination
+- <http://localhost:3000/trust> — compliance, audit verification, and break-glass controls
+
+Set `NEXT_PUBLIC_VIGIL_URL` in the frontend deployment to the persistent public
+URL of the FastAPI service. Without it, the browser uses `http://localhost:8000`
+and visibly identifies any unavailable backend as stage-safe preview mode.
 
 ### Capabilities and graceful degradation
 

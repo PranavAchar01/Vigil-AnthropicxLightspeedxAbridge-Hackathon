@@ -108,6 +108,7 @@ def _capabilities() -> dict[str, bool]:
         "role_redaction": True,
         "audit_chain": True,
         "demo_replay": True,
+        "live_perception": settings.perception_enabled,
     }
 
 
@@ -334,8 +335,9 @@ async def lifespan(app: FastAPI):
         loop.call_soon_threadsafe(_on_perception, ev)
 
     state.stop.clear()
-    threading.Thread(target=_start_vision, args=(sink,), daemon=True).start()
-    threading.Thread(target=_start_audio, args=(sink,), daemon=True).start()
+    if settings.perception_enabled:
+        threading.Thread(target=_start_vision, args=(sink,), daemon=True).start()
+        threading.Thread(target=_start_audio, args=(sink,), daemon=True).start()
     caps = _capabilities()
     log.info(
         "Vigil up on http://localhost:8000 — capabilities: %s",
@@ -458,7 +460,9 @@ async def events(ws: WebSocket):
         while True:
             ev: BusEvent = await q.get()
             await ws.send_json(ev.model_dump())
-    except WebSocketDisconnect:
+    except (WebSocketDisconnect, RuntimeError):
+        # Uvicorn may surface a closed transport as RuntimeError when the page
+        # navigates away between queue delivery and send_json.
         pass
     finally:
         bus.unsubscribe(q)

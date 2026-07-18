@@ -369,6 +369,51 @@ class MonitorRegistry:
                 monitor.baseline_deviation = max(0.0, monitor.baseline_deviation - 0.3)
             return alert.model_copy(deep=True)
 
+    def request_medical_assist(self, seat: str, actor: str) -> AlertRecord:
+        """Route a nonclinical staff request into the same clinical alert queue."""
+        normalized = seat.strip().upper()
+        with self._lock:
+            monitor = next(
+                (item for item in self._monitors.values() if item.seat.strip().upper() == normalized),
+                None,
+            )
+            if monitor is None:
+                raise KeyError(seat)
+
+            now = time.time()
+            existing = self._alerts.get(monitor.active_alert_id or "")
+            if existing and existing.state not in {
+                EscalationState.ACKNOWLEDGED,
+                EscalationState.RESOLVED,
+            }:
+                existing.state = EscalationState.PAGE_PENDING
+                existing.title = "Staff requested medical assist"
+                existing.evidence = list(
+                    dict.fromkeys(existing.evidence + [f"request routed by {actor}"])
+                )
+                existing.acknowledgement_due_at = now + 60
+                existing.updated_at = now
+                alert = existing
+            else:
+                alert = AlertRecord(
+                    patient_id=monitor.patient_id,
+                    severity=Severity.HARD,
+                    state=EscalationState.PAGE_PENDING,
+                    title="Staff requested medical assist",
+                    evidence=[f"request routed by {actor}"],
+                    prior_esi=monitor.current_esi,
+                    current_esi=monitor.current_esi,
+                    acknowledgement_due_at=now + 60,
+                )
+                self._alerts[alert.alert_id] = alert
+                self._alerts_created += 1
+
+            monitor.active_alert_id = alert.alert_id
+            monitor.escalation_state = EscalationState.PAGE_PENDING
+            monitor.latest_signal = "Staff requested medical assist"
+            monitor.last_event_at = now
+            return alert.model_copy(deep=True)
+
     def alerts(self) -> list[AlertRecord]:
         with self._lock:
             return [a.model_copy(deep=True) for a in self._alerts.values()]
