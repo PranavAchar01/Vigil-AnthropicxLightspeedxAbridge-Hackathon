@@ -205,7 +205,7 @@ def build_risk_flag(inc: Incident, enc: str) -> dict:
         "category": [{"coding": [{"system": FLAG_CAT, "code": "safety", "display": "Safety"}]}],
         "code": {
             "coding": [{"system": SCT, "code": AT_RISK_SCT, "display": "At risk for falls"}],
-            "text": f"Elevated risk — {inc.event_display} (ESI-{inc.new_esi})",
+            "text": f"Elevated risk: {inc.event_display} (ESI-{inc.new_esi})",
         },
         "subject": _pt(inc),
         "period": {"start": inc.detected_at},

@@ -104,7 +104,7 @@ class EventFuser:
         if down and has_scream:
             return Severity.HARD, ["scream", down_kind], "Scream + collapse detected"
         if has_collapse:
-            return Severity.HARD, ["collapse"], "Patient collapsed / fainted — motionless"
+            return Severity.HARD, ["collapse"], "Patient collapsed and is motionless"
         if has_fall:
             return Severity.HARD, ["fall"], "Collapse detected"
         if has_scream and conf.get("scream", 0.0) >= 0.6:

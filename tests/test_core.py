@@ -149,6 +149,22 @@ def test_escalation_is_derived_not_trusted():
     assert d.new_esi == 1 and d.escalate is True
 
 
+def test_voice_checkin_reaches_escalation_ladder_without_esi_change():
+    chart = make_chart(esi=4)
+    d = triage._finalize(
+        {
+            "new_esi": 4,
+            "action": "voice_checkin",
+            "rationale": "ambiguous soft signal",
+            "spoken_summary": "check in",
+        },
+        chart,
+    )
+    assert d.new_esi == 4
+    assert d.action == Action.VOICE_CHECKIN
+    assert d.escalate is True
+
+
 # --------------------------- reasoning requires a real key ---------------------------
 
 

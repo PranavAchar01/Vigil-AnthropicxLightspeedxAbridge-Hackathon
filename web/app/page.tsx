@@ -1,11 +1,19 @@
 "use client";
 
-import { useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import BackendFeed from "./BackendFeed";
+import {
+  ROLES,
+  fetchVigilSession,
+  localSession,
+  postVigilCommand,
+  type QueuePatient,
+  type VigilRole,
+  type VigilSession,
+} from "./demoSession";
 
 const BACKEND =
   process.env.NEXT_PUBLIC_VIGIL_URL || "https://mask-scoop-debate-devoted.trycloudflare.com";
-const SUPABASE_URL = process.env.NEXT_PUBLIC_SUPABASE_URL || "";
 
 type Line = { id: number; cls: string; text: string };
 type Caps = Record<string, boolean>;
@@ -55,11 +63,17 @@ export default function Home() {
   const [logItems, setLogItems] = useState<string[]>([]);
   const [note, setNote] = useState<{ text: string; bundle?: string } | null>(null);
   const [camOk, setCamOk] = useState(false);
+  const [role, setRole] = useState<VigilRole>("charge_nurse");
+  const [session, setSession] = useState<VigilSession>(() => localSession("charge_nurse", 0));
+  const [selectedKey, setSelectedKey] = useState("demo-vega");
+  const [commandBusy, setCommandBusy] = useState(false);
+  const [demoPlaying, setDemoPlaying] = useState(false);
 
   const idRef = useRef(1);
   const deltaRef = useRef<number | null>(null);
   const freshRef = useRef(true);
   const traceEnd = useRef<HTMLDivElement>(null);
+  const demoStepRef = useRef(0);
 
   useEffect(() => {
     traceEnd.current?.scrollIntoView({ block: "end", behavior: "smooth" });
@@ -220,13 +234,207 @@ export default function Home() {
     };
   }, []);
 
+  const refreshSession = useCallback(async (nextRole: VigilRole, fallbackStep?: number) => {
+    try {
+      const next = await fetchVigilSession(BACKEND, nextRole);
+      demoStepRef.current = next.demo.step;
+      setSession(next);
+      setConn((current) => (current === "down" ? "live" : current));
+      return next;
+    } catch {
+      const next = localSession(nextRole, fallbackStep ?? demoStepRef.current);
+      setSession(next);
+      return next;
+    }
+  }, []);
+
+  useEffect(() => {
+    void refreshSession(role);
+  }, [refreshSession, role]);
+
+  const applyDemoNarrative = useCallback((step: number) => {
+    const narratives: Record<number, { line: string; banner: { text: string; detail: string; alert: boolean } }> = {
+      0: {
+        line: "Three patient baselines established. Queue ranking includes acuity, time, chart risk, and change from baseline.",
+        banner: { text: "Monitoring", detail: "No active escalation", alert: false },
+      },
+      1: {
+        line: "Maria Vega: posture declined from baseline for 74 seconds. Tier 0 starts voice and text check-in.",
+        banner: { text: "Patient check-in", detail: "Maria Vega, seat A3", alert: true },
+      },
+      2: {
+        line: "Labored breathing corroborates postural decline. Cardiac history and low oxygen saturation raise urgency from ESI 3 to ESI 2.",
+        banner: { text: "ESI 2", detail: "Nurse acknowledgement requested", alert: true },
+      },
+      3: {
+        line: "Jordan Park: low-confidence movement above baseline. Check-in only, no nurse page.",
+        banner: { text: "Check-in active", detail: "Ambiguous signal held below page threshold", alert: true },
+      },
+      4: {
+        line: "Idris Cole: companion moved rapidly toward staff. Hard safety signal routed to seat B1.",
+        banner: { text: "Medical assist", detail: "Companion alarm at seat B1", alert: true },
+      },
+      5: {
+        line: "Replay complete. All decisions remain available with exact input hashes in the audit chain.",
+        banner: { text: "Replay complete", detail: "Review, acknowledge, or label each alert", alert: false },
+      },
+    };
+    const narrative = narratives[step] ?? narratives[5];
+    setLines((previous) => [
+      ...previous.slice(-5),
+      { id: idRef.current++, cls: step >= 2 && step <= 4 ? "signal-line" : "system-line", text: narrative.line },
+    ]);
+    setBanner(narrative.banner);
+  }, []);
+
+  const runDemoStep = useCallback(
+    async (targetStep?: number) => {
+      const nextStep = Math.min(targetStep ?? demoStepRef.current + 1, 5);
+      setCommandBusy(true);
+      try {
+        const response = await postVigilCommand(BACKEND, "/api/v1/demo/advance", role);
+        if (!response.ok) throw new Error("Demo advance unavailable");
+        await refreshSession(role, nextStep);
+      } catch {
+        demoStepRef.current = nextStep;
+        setSession(localSession(role, nextStep));
+      } finally {
+        demoStepRef.current = nextStep;
+        applyDemoNarrative(nextStep);
+        setCommandBusy(false);
+      }
+    },
+    [applyDemoNarrative, refreshSession, role],
+  );
+
+  const resetDemo = useCallback(async () => {
+    setCommandBusy(true);
+    try {
+      const response = await postVigilCommand(BACKEND, "/api/v1/demo/reset", role);
+      if (!response.ok) throw new Error("Demo reset unavailable");
+      await refreshSession(role, 0);
+    } catch {
+      setSession(localSession(role, 0));
+    } finally {
+      demoStepRef.current = 0;
+      applyDemoNarrative(0);
+      setSelectedKey("demo-vega");
+      setCommandBusy(false);
+    }
+  }, [applyDemoNarrative, refreshSession, role]);
+
+  const playDemo = useCallback(async () => {
+    if (demoPlaying) return;
+    setDemoPlaying(true);
+    await resetDemo();
+    for (let step = 1; step <= 5; step += 1) {
+      await new Promise((resolve) => window.setTimeout(resolve, 900));
+      await runDemoStep(step);
+    }
+    setDemoPlaying(false);
+  }, [demoPlaying, resetDemo, runDemoStep]);
+
+  const updateAlert = useCallback(
+    async (outcome: "acknowledge" | "confirmed" | "false_alarm") => {
+      const patient = session.queue.find((item) => (item.patient_id ?? item.patient_ref) === selectedKey);
+      const alert = patient?.alert;
+      if (!alert) return;
+      setCommandBusy(true);
+      try {
+        const path = outcome === "acknowledge"
+          ? `/api/v1/alerts/${alert.alert_id}/acknowledge`
+          : `/api/v1/alerts/${alert.alert_id}/feedback`;
+        const body = outcome === "acknowledge"
+          ? { actor: "Charge RN" }
+          : { actor: "Charge RN", outcome };
+        const response = await postVigilCommand(BACKEND, path, role, body);
+        if (!response.ok) throw new Error("Alert update unavailable");
+        await refreshSession(role);
+      } catch {
+        setSession((current) => ({
+          ...current,
+          queue: current.queue.map((item) => {
+            if ((item.patient_id ?? item.patient_ref) !== selectedKey || !item.alert) return item;
+            return {
+              ...item,
+              status: outcome === "acknowledge" ? "acknowledged" : "resolved",
+              alert: {
+                ...item.alert,
+                state: outcome === "acknowledge" ? "acknowledged" : "resolved",
+                acknowledged_by: outcome === "acknowledge" ? "Charge RN" : item.alert.acknowledged_by,
+              },
+            };
+          }),
+        }));
+      } finally {
+        setLogItems((items) => [
+          outcome === "acknowledge" ? "Charge RN acknowledged the alert" : `Alert feedback recorded: ${outcome.replace("_", " ")}`,
+          ...items,
+        ]);
+        setCommandBusy(false);
+      }
+    },
+    [refreshSession, role, selectedKey, session.queue],
+  );
+
   const capability = (name: string, fallback = false) => Boolean(caps[name] || fallback);
-  const patientMeta = patient
-    ? [patient.age ? `${patient.age} years` : null, patient.gender, patient.visit]
+  const selectedPatient =
+    session.queue.find((item) => (item.patient_id ?? item.patient_ref) === selectedKey) ??
+    session.queue[0];
+  const clinicalPatient = selectedPatient?.name && !selectedPatient.redacted ? selectedPatient : null;
+  const roleHasClinicalContext = !["front_desk", "security", "compliance"].includes(role);
+  const displayPatient: Patient | null = clinicalPatient
+    ? {
+        name: clinicalPatient.name ?? "Unknown patient",
+        age: clinicalPatient.age,
+        gender: clinicalPatient.gender,
+        visit: clinicalPatient.visit,
+        baseline_esi: clinicalPatient.current_esi,
+        conditions: clinicalPatient.chart?.conditions,
+        medications: clinicalPatient.chart?.medications,
+        vitals: clinicalPatient.chart
+          ? Object.fromEntries(
+              Object.entries(clinicalPatient.chart.vitals).map(([key, value]) => [
+                key,
+                `${value.value}${value.unit}`,
+              ]),
+            )
+          : undefined,
+      }
+    : roleHasClinicalContext
+      ? patient
+      : null;
+  const patientMeta = displayPatient
+    ? [displayPatient.age ? `${displayPatient.age} years` : null, displayPatient.gender, displayPatient.visit]
         .filter(Boolean)
         .map(cleanText)
         .join(" / ")
     : "Recognition begins when a patient enters the camera view.";
+  const canViewObservation = session.scopes.includes("video:view") || role === "attending";
+  const selectedAlert = selectedPatient?.alert;
+  const limitedRole = role === "front_desk" || role === "security" || role === "compliance";
+  const responseActive = Boolean(
+    selectedAlert || selectedPatient?.flagged || selectedPatient?.medical_assist_needed || (!limitedRole && banner.alert),
+  );
+  const responseTitle = selectedAlert
+    ? cleanText(selectedAlert.title)
+    : selectedPatient?.medical_assist_needed
+      ? "Medical assist needed"
+      : selectedPatient?.flagged
+        ? "Flagged for clinical review"
+        : limitedRole
+          ? "Monitoring"
+          : banner.text;
+  const responseDetail = selectedAlert
+    ? `${cleanText(selectedAlert.state).replace(/_/g, " ")} / ESI ${selectedAlert.prior_esi} to ${selectedAlert.current_esi}`
+    : selectedPatient?.medical_assist_needed
+      ? `Seat ${selectedPatient.seat ?? "assigned zone"} / no clinical detail provided`
+      : selectedPatient?.flagged
+        ? "Clinical details restricted by scope"
+        : limitedRole
+          ? "No scoped alert for this selection"
+          : banner.detail;
+  const visibleLogItems = limitedRole ? [] : logItems;
 
   return (
     <div className="app-shell">
@@ -246,7 +454,23 @@ export default function Home() {
 
         <div className="session-details" aria-label="Session details">
           <span>Waiting room 01</span>
-          <span>Skeleton view only</span>
+          <label className="role-control">
+            <span>Viewing as</span>
+            <select
+              value={role}
+              onChange={(event) => {
+                const nextRole = event.target.value as VigilRole;
+                setRole(nextRole);
+                setSession(localSession(nextRole, demoStepRef.current));
+                setSelectedKey("demo-vega");
+              }}
+              aria-label="View command center as role"
+            >
+              {ROLES.map((item) => (
+                <option value={item.value} key={item.value}>{item.label}</option>
+              ))}
+            </select>
+          </label>
         </div>
 
         <div className={`connection-state ${conn}`}>
@@ -257,6 +481,41 @@ export default function Home() {
           </div>
         </div>
       </header>
+
+      <section className="queue-board surface" aria-label="Ranked re-triage queue">
+        <div className="queue-heading">
+          <div>
+            <span className="eyebrow">Live priority model</span>
+            <h2>Re-triage queue</h2>
+            <p>Ranked by acuity, change from baseline, reassessment time, and chart risk</p>
+          </div>
+          <div className="demo-controls">
+            <div className="demo-progress" aria-label={`Demo step ${session.demo.step} of ${session.demo.total_steps}`}>
+              <span style={{ width: `${(session.demo.step / session.demo.total_steps) * 100}%` }} />
+            </div>
+            <span className="source-pill">{session.source === "backend" ? "Edge state" : "Stage-safe preview"}</span>
+            <button type="button" onClick={() => void resetDemo()} disabled={commandBusy}>Reset</button>
+            <button type="button" onClick={() => void runDemoStep()} disabled={commandBusy || session.demo.step >= 5}>Next signal</button>
+            <button className="primary" type="button" onClick={() => void playDemo()} disabled={commandBusy || demoPlaying}>
+              {demoPlaying ? "Replaying" : "Run replay"}
+            </button>
+          </div>
+        </div>
+
+        <div className="queue-list">
+          {session.queue.map((item, index) => {
+            const key = item.patient_id ?? item.patient_ref ?? `queue-${index}`;
+            return (
+              <QueueCard
+                patient={item}
+                selected={key === selectedKey || (!session.queue.some((candidate) => (candidate.patient_id ?? candidate.patient_ref) === selectedKey) && index === 0)}
+                onSelect={() => setSelectedKey(key)}
+                key={key}
+              />
+            );
+          })}
+        </div>
+      </section>
 
       <main className="workspace">
         <section className="workspace-panel observation-panel surface">
@@ -270,70 +529,84 @@ export default function Home() {
                 if ((event.target as HTMLImageElement).naturalWidth) setCamOk(true);
               }}
               onError={() => setCamOk(false)}
-              style={{ display: camOk ? "block" : "none" }}
+              style={{ display: camOk && canViewObservation ? "block" : "none" }}
             />
             <div className="video-hud">
               <span>CAM 01</span>
-              <span className={camOk ? "hud-live" : ""}>{camOk ? "Streaming" : "Standby"}</span>
+              <span className={camOk && canViewObservation ? "hud-live" : ""}>
+                {canViewObservation ? (camOk ? "Streaming" : "Standby") : "Restricted"}
+              </span>
             </div>
-            {!camOk ? (
+            {!camOk || !canViewObservation ? (
               <div className="camera-empty">
                 <div className="scanner" aria-hidden="true">
                   <i />
                 </div>
-                <strong>Camera ready</strong>
-                <span>Waiting for the edge feed</span>
+                <strong>{canViewObservation ? "Camera ready" : "Video omitted by role scope"}</strong>
+                <span>{canViewObservation ? "Waiting for the edge feed" : "The server did not send video data"}</span>
               </div>
             ) : null}
           </div>
 
           <article className="patient-card inset-surface">
-            <div className="patient-heading">
-              <div>
-                <span className="eyebrow">Patient context</span>
-                <h3>{patient ? cleanText(patient.name) : "Waiting for patient"}</h3>
-                <p>{patientMeta}</p>
-              </div>
-              <div className={`esi-tile ${patient ? "identified" : ""}`}>
-                <span>Baseline</span>
-                <strong>{patient ? `ESI ${patient.baseline_esi}` : "Pending"}</strong>
-              </div>
-            </div>
+            {clinicalPatient || displayPatient ? (
+              <>
+                <div className="patient-heading">
+                  <div>
+                    <span className="eyebrow">Patient context</span>
+                    <h3>{displayPatient ? cleanText(displayPatient.name) : "Waiting for patient"}</h3>
+                    <p>{patientMeta}</p>
+                  </div>
+                  <div className={`esi-tile ${displayPatient ? "identified" : ""}`}>
+                    <span>{clinicalPatient?.initial_esi !== clinicalPatient?.current_esi ? "Re-triaged" : "Current"}</span>
+                    <strong>{displayPatient ? `ESI ${displayPatient.baseline_esi}` : "Pending"}</strong>
+                  </div>
+                </div>
 
-            <div className="patient-grid">
-              <div className="vitals-block">
-                <span className="field-label">Latest vitals</span>
-                <div className="vitals-list">
-                  {patient?.vitals && Object.keys(patient.vitals).length ? (
-                    Object.entries(patient.vitals)
-                      .slice(0, 4)
-                      .map(([key, value]) => (
-                        <div key={key}>
-                          <span>{cleanText(key).replace(/_/g, " ")}</span>
-                          <strong>{cleanText(value)}</strong>
-                        </div>
-                      ))
-                  ) : (
-                    <p className="quiet-copy">No chart selected</p>
-                  )}
-                </div>
-              </div>
+                <div className="patient-grid">
+                  <div className="vitals-block">
+                    <span className="field-label">Latest vitals</span>
+                    <div className="vitals-list">
+                      {displayPatient?.vitals && Object.keys(displayPatient.vitals).length ? (
+                        Object.entries(displayPatient.vitals)
+                          .slice(0, 4)
+                          .map(([key, value]) => (
+                            <div key={key}>
+                              <span>{cleanText(key).replace(/_/g, " ")}</span>
+                              <strong>{cleanText(value)}</strong>
+                            </div>
+                          ))
+                      ) : (
+                        <p className="quiet-copy">No chart selected</p>
+                      )}
+                    </div>
+                  </div>
 
-              <div className="clinical-block">
-                <span className="field-label">Active conditions</span>
-                <div className="chips">
-                  {(patient?.conditions?.length ? patient.conditions : ["No data"]).slice(0, 5).map((item) => (
-                    <span className="chip" key={item}>{cleanText(item)}</span>
-                  ))}
+                  <div className="clinical-block">
+                    <span className="field-label">Active conditions</span>
+                    <div className="chips">
+                      {(displayPatient?.conditions?.length ? displayPatient.conditions : ["No data"]).slice(0, 5).map((item) => (
+                        <span className="chip" key={item}>{cleanText(item)}</span>
+                      ))}
+                    </div>
+                    <span className="field-label medications-label">Medications</span>
+                    <div className="chips">
+                      {(displayPatient?.medications?.length ? displayPatient.medications : ["No data"]).slice(0, 5).map((item) => (
+                        <span className="chip" key={item}>{cleanText(item)}</span>
+                      ))}
+                    </div>
+                  </div>
                 </div>
-                <span className="field-label medications-label">Medications</span>
-                <div className="chips">
-                  {(patient?.medications?.length ? patient.medications : ["No data"]).slice(0, 5).map((item) => (
-                    <span className="chip" key={item}>{cleanText(item)}</span>
-                  ))}
-                </div>
+              </>
+            ) : (
+              <div className="redaction-card">
+                <span className="redaction-mark" aria-hidden="true" />
+                <span className="eyebrow">Minimum necessary access</span>
+                <h3>Clinical context withheld</h3>
+                <p>This role receives a server-filtered response. Names, chart data, reasoning, and video fields never cross the API boundary.</p>
+                <code>{selectedPatient?.patient_ref ?? selectedPatient?.name ?? "restricted_by_scope"}</code>
               </div>
-            </div>
+            )}
           </article>
         </section>
 
@@ -343,58 +616,80 @@ export default function Home() {
             <span className="mode-pill"><i /> Agent ready</span>
           </div>
 
-          <div className="reasoning-status inset-surface">
-            <div className="pulse-graph" aria-hidden="true"><i /><i /><i /><i /><i /></div>
-            <div>
-              <span className="eyebrow">Current state</span>
-              <strong>{banner.alert ? "Review in progress" : "Continuous monitoring"}</strong>
-            </div>
-            <span className="reasoning-time">Real time</span>
-          </div>
-
-          <div className="trace" aria-live="polite">
-            <div className="trace-rail" aria-hidden="true" />
-            {lines.map((line) =>
-              line.cls === "decision-block" ? (
-                <Decision key={line.id} raw={line.text} />
-              ) : (
-                <div key={line.id} className={`trace-line ${line.cls}`}>
-                  <span className="trace-node" />
-                  <p>{line.text}</p>
+          {session.scopes.includes("reason:read") ? (
+            <>
+              <div className="reasoning-status inset-surface">
+                <div className="pulse-graph" aria-hidden="true"><i /><i /><i /><i /><i /></div>
+                <div>
+                  <span className="eyebrow">Current state</span>
+                  <strong>{banner.alert ? "Review in progress" : "Continuous monitoring"}</strong>
                 </div>
-              ),
-            )}
-            <div ref={traceEnd} />
-          </div>
+                <span className="reasoning-time">Tier 0 always on</span>
+              </div>
+
+              <div className="trace" aria-live="polite">
+                <div className="trace-rail" aria-hidden="true" />
+                {lines.map((line) =>
+                  line.cls === "decision-block" ? (
+                    <Decision key={line.id} raw={line.text} />
+                  ) : (
+                    <div key={line.id} className={`trace-line ${line.cls}`}>
+                      <span className="trace-node" />
+                      <p>{line.text}</p>
+                    </div>
+                  ),
+                )}
+                <div ref={traceEnd} />
+              </div>
+            </>
+          ) : (
+            <div className="scope-boundary inset-surface">
+              <span className="scope-lock" aria-hidden="true" />
+              <span className="eyebrow">Server response</span>
+              <h3>Reasoning restricted by scope</h3>
+              <p>The response for {ROLES.find((item) => item.value === role)?.label} contains no rationale or evidence fields.</p>
+              <code>reason:read / denied</code>
+            </div>
+          )}
         </section>
 
         <section className="workspace-panel response-panel surface">
           <SectionTitle index="03" title="Response" meta="Escalation and record" />
 
-          <div className={`response-state inset-surface ${banner.alert ? "alert" : ""}`}>
+          <div className={`response-state inset-surface ${responseActive ? "alert" : ""}`}>
             <div className="response-orbit"><span /></div>
             <div>
               <span className="eyebrow">Escalation state</span>
-              <h3>{banner.text}</h3>
-              <p>{banner.detail}</p>
+              <h3>{responseTitle}</h3>
+              <p>{responseDetail}</p>
             </div>
           </div>
 
           <div className="capability-grid">
-            <Capability label="Reasoning" active={capability("reasoning")} />
-            <Capability label="Nurse call" active={capability("nurse_call")} />
-            <Capability label="Patient check-in" active={capability("patient_checkin")} />
-            <Capability label="Camera" active={camOk} />
+            <Capability label="Tier 0 guard" active={capability("multi_patient", true)} />
+            <Capability label="Acknowledge" active={session.scopes.includes("escalate:ack")} />
+            <Capability label="Text check-in" active={capability("demo_replay", true)} />
+            <Capability label="Audit chain" active={session.audit_verified.valid} />
           </div>
+
+          {selectedAlert && session.scopes.includes("escalate:ack") ? (
+            <div className="alert-actions" aria-label="Alert actions">
+              <button type="button" onClick={() => void updateAlert("acknowledge")} disabled={commandBusy || selectedAlert.state === "acknowledged"}>
+                {selectedAlert.state === "acknowledged" ? "Acknowledged" : "Acknowledge"}
+              </button>
+              <button type="button" onClick={() => void updateAlert("confirmed")} disabled={commandBusy}>Confirmed</button>
+              <button type="button" onClick={() => void updateAlert("false_alarm")} disabled={commandBusy}>False alarm</button>
+            </div>
+          ) : null}
 
           <div className="response-section">
             <div className="subhead">
               <span>Activity</span>
-              <small>{logItems.length ? `${logItems.length} updates` : "Quiet"}</small>
+              <small>{visibleLogItems.length ? `${visibleLogItems.length} updates` : "Quiet"}</small>
             </div>
             <div className="activity-list inset-surface">
-              {logItems.length ? (
-                logItems.slice(0, 6).map((item, index) => (
+              {visibleLogItems.length ? (
+                visibleLogItems.slice(0, 6).map((item, index) => (
                   <div className="activity-item" key={`${item}-${index}`}>
                     <span />
                     <p>{item}</p>
@@ -415,19 +710,91 @@ export default function Home() {
               <small className={note?.bundle ? "record-ready" : ""}>{note?.bundle ? "FHIR ready" : "Awaiting incident"}</small>
             </div>
             <div className="note-preview inset-surface">
-              {note?.text ? <p>{note.text}</p> : <p className="quiet-copy">The clinical note will appear after an escalation.</p>}
+              {note?.text ? (
+                <p>{note.text}</p>
+              ) : selectedAlert && session.scopes.includes("chart:read") ? (
+                <p>
+                  Vigil detected {cleanText(selectedAlert.title).toLowerCase()}. Acuity changed from ESI {selectedAlert.prior_esi} to ESI {selectedAlert.current_esi}. The nurse acknowledgement and source observations are linked in the FHIR Provenance record.
+                </p>
+              ) : (
+                <p className="quiet-copy">The clinical note will appear after an escalation.</p>
+              )}
             </div>
           </div>
 
+          {session.audit ? (
+            <div className="audit-section">
+              <div className="subhead">
+                <span>Audit chain</span>
+                <small className={session.audit_verified.valid ? "record-ready" : ""}>
+                  {session.audit_verified.valid ? `${session.audit_verified.blocks} blocks verified` : "Verification failed"}
+                </small>
+              </div>
+              <div className="audit-list inset-surface">
+                {session.audit.slice(-4).reverse().map((block) => (
+                  <div className={`audit-row ${block.outcome === "denied" ? "denied" : ""}`} key={block.audit_id}>
+                    <code>{block.hash.slice(0, 8)}</code>
+                    <span>{cleanText(block.action).replace(/_/g, " ")}</span>
+                    <small>{cleanText(block.outcome)}</small>
+                  </div>
+                ))}
+              </div>
+            </div>
+          ) : null}
+
           <div className="mirror-state">
-            <span className={SUPABASE_URL ? "online" : ""} />
-            Event mirror {SUPABASE_URL ? "connected" : "not configured"}
+            <span className={session.audit_verified.valid ? "online" : ""} />
+            Alert budget {session.alert_budget.used} of {session.alert_budget.limit} this shift
           </div>
         </section>
       </main>
 
-      <BackendFeed />
+      <BackendFeed audit={session.audit} />
     </div>
+  );
+}
+
+function QueueCard({
+  patient,
+  selected,
+  onSelect,
+}: {
+  patient: QueuePatient;
+  selected: boolean;
+  onSelect: () => void;
+}) {
+  const label = patient.name ?? patient.patient_ref ?? "Unidentified track";
+  const active = Boolean(
+    patient.alert || patient.flagged || patient.medical_assist_needed,
+  );
+  const state = patient.alert?.state ?? patient.status ?? (active ? "flagged" : "monitoring");
+  return (
+    <button
+      type="button"
+      className={`queue-card ${selected ? "selected" : ""} ${active ? "active" : ""}`}
+      onClick={onSelect}
+      aria-pressed={selected}
+    >
+      <span className="queue-rank">{patient.priority ? Math.round(patient.priority) : patient.seat ?? "ID"}</span>
+      <span className="queue-person">
+        <strong>{cleanText(label)}</strong>
+        <small>
+          {[patient.seat ? `Seat ${patient.seat}` : null, patient.wait_minutes != null ? `${patient.wait_minutes} min` : null]
+            .filter(Boolean)
+            .join(" / ") || "Identity withheld"}
+        </small>
+      </span>
+      {patient.current_esi ? (
+        <span className="queue-esi">
+          <small>ESI</small>
+          <strong>{patient.current_esi}</strong>
+        </span>
+      ) : null}
+      <span className={`queue-state ${active ? "active" : ""}`}>
+        <i />
+        {cleanText(state).replace(/_/g, " ")}
+      </span>
+    </button>
   );
 }
 

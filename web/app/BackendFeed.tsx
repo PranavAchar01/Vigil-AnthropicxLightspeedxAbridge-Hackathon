@@ -2,9 +2,10 @@
 
 import { useEffect, useState } from "react";
 import { supabase } from "./lib/supabase";
+import type { AuditView } from "./demoSession";
 
 type Row = {
-  id: number;
+  id: number | string;
   created_at: string;
   type: string;
   source?: string | null;
@@ -45,7 +46,17 @@ function statusLabel(status: "off" | "connecting" | "live"): string {
   return "Not configured";
 }
 
-export default function BackendFeed() {
+function eventTime(value: string): string {
+  return new Date(value).toLocaleTimeString("en-US", {
+    hour12: false,
+    hour: "2-digit",
+    minute: "2-digit",
+    second: "2-digit",
+    timeZone: "UTC",
+  });
+}
+
+export default function BackendFeed({ audit }: { audit?: AuditView[] }) {
   const [rows, setRows] = useState<Row[]>([]);
   const [status, setStatus] = useState<"off" | "connecting" | "live">(supabase ? "connecting" : "off");
 
@@ -77,6 +88,17 @@ export default function BackendFeed() {
     };
   }, []);
 
+  const displayRows: Row[] = rows.length
+    ? rows
+    : (audit ?? []).slice().reverse().map((block) => ({
+        id: block.audit_id,
+        created_at: new Date(block.ts * 1000).toISOString(),
+        type: block.action === "retriage_decision" ? "decision" : block.outcome === "denied" ? "escalation" : "tool_call",
+        source: block.role,
+        patient: block.resource.startsWith("patient:") ? block.resource.slice(8) : null,
+        summary: `${block.action.replace(/_/g, " ")}: ${block.outcome} / hash ${block.hash.slice(0, 8)}`,
+      }));
+
   return (
     <section className="event-dock surface" aria-label="System events">
       <div className="event-heading">
@@ -89,7 +111,7 @@ export default function BackendFeed() {
         </div>
         <span className={`event-status ${status}`}>
           <i aria-hidden="true" />
-          {statusLabel(status)}
+          {rows.length ? statusLabel(status) : displayRows.length ? "Audit chain" : statusLabel(status)}
         </span>
       </div>
 
@@ -103,15 +125,15 @@ export default function BackendFeed() {
         </div>
 
         <div className="event-rows">
-          {rows.length === 0 ? (
+          {displayRows.length === 0 ? (
             <div className="event-empty">
               <span className="empty-line" aria-hidden="true" />
               <p>Event stream ready. New sensor and agent activity will appear here.</p>
             </div>
           ) : (
-            rows.map((row) => (
+            displayRows.map((row) => (
               <div key={row.id} className={`event-row ${tone(row.type)}`} role="row">
-                <time>{new Date(row.created_at).toLocaleTimeString([], { hour12: false })}</time>
+                <time>{eventTime(row.created_at)}</time>
                 <span className="event-type">{cleanText(TYPE_LABEL[row.type] ?? row.type)}</span>
                 <span className="event-source">{cleanText(row.source) || "System"}</span>
                 <span className="event-summary">{cleanText(row.summary) || cleanText(row.type)}</span>

@@ -171,16 +171,16 @@ The escalation therefore creates its own structured audit trail.
 
 ## Current implementation
 
-This repository implements the core perceive → reason → act → document loop:
+This repository implements the perceive, reason, act, document, and audit loop:
 
 ```text
 Camera + microphone
         ↓
 YOLO pose events + audio distress events
         ↓
-Sliding-window event fusion
+Per-patient sliding-window event fusion
         ↓
-Claude re-triage against a synthetic FHIR chart
+Tier 0 rules, with optional Claude re-triage
         ↓
 Code-enforced monotonic ESI safety rules
         ↓
@@ -188,7 +188,7 @@ ElevenLabs or Twilio nurse call
         ↓
 SOAP note + local FHIR transaction bundle
         ↓
-Live FastAPI/WebSocket dashboard
+Ranked multi-patient command center and audit chain
 ```
 
 Implemented today:
@@ -196,35 +196,44 @@ Implemented today:
 - webcam pose tracking with fall, slumping, and motionlessness detection;
 - microphone scream/distress detection using YAMNet or a lightweight fallback;
 - hard/soft event fusion with cooldown protection;
+- independent fusion windows, baselines, and alert state for every monitored patient;
+- consent-gated track binding with bound, stale, and unbound lifecycle states;
 - chart extraction from the Abridge synthetic FHIR dataset;
-- Claude-based structured re-triage;
+- deterministic Tier 0 re-triage that works without external services;
+- optional Claude-based structured Tier 1 re-triage;
 - code-level monotonic ESI enforcement and fail-safe escalation;
+- time-aware ranked re-triage queue across three simultaneous demo patients;
+- six role scopes with server-side field redaction;
+- nurse acknowledgement, confirmed-event, and false-alarm feedback controls;
+- hash-chained access and decision audit blocks with one-pass verification;
+- typed, expiring break-glass grants and permanent compliance events;
+- rule-floored intake ESI estimation for high-risk complaints;
 - patient voice check-in policy;
 - ElevenLabs conversational calls with direct Twilio fallback;
 - an ElevenLabs conversational agent that can securely request the active
   patient's live posture, motion, last event, and ESI status during a call;
 - on-device face enrollment and face-to-chart selection using InsightFace;
-- SOAP note generation and a seven-resource FHIR transaction bundle;
+- SOAP note generation and an eight-resource FHIR transaction bundle with Provenance;
 - a local live dashboard plus a Next.js command center for patient context,
   perception, reasoning, escalation, and documentation;
+- a deterministic stage replay that works even when the camera or edge tunnel is unavailable;
 - optional Supabase event mirroring for remote observability;
-- offline tests for safety-critical policy and FHIR bundle shape.
+- offline tests for safety policy, role redaction, audit integrity, identity binding,
+  queue ranking, replay behavior, and FHIR bundle shape.
 
-Planned for the full demo architecture:
+Still planned beyond the hackathon demo:
 
 - voice/video intake and initial ESI estimation;
-- patient registry and monitoring profiles;
-- persistent mapping of multiple camera track IDs to individual patient monitors;
-- simultaneous monitoring of multiple patients;
 - longer temporal baselines and a broader visual/audio event catalog;
-- natural-language distress understanding;
-- multi-patient dashboard controls and a reliable demo simulation path;
+- live ASR for natural-language distress understanding;
+- production JWT identity provider integration;
+- multi-camera handoff and directional audio localization;
 - optional submission of the generated bundle to a real FHIR endpoint.
 
-The current implementation is a single-participant demo. A recognized face can
-automatically replace the manually selected active patient, but pose observations
-are still routed to that one active profile rather than maintaining independent
-state for every visible track.
+The stage replay runs three independent patient monitors. Live camera events are
+routed through persistent track bindings and the same monitoring registry. The
+demo role picker uses a role header to make field-level redaction inspectable;
+production deployment still requires a hospital identity provider.
 
 ---
 
@@ -235,6 +244,10 @@ vigil/
   config.py            # environment-driven models, credentials, and thresholds
   events.py            # typed objects passed through the complete pipeline
   chart.py             # synthetic FHIR data → compact PatientChart
+  monitoring.py        # multi-patient state, queue ranking, binding, alerts
+  security.py          # role scopes, redaction, break-glass, hash audit
+  intake.py            # deterministic initial ESI safety floors
+  demo.py              # three-patient deterministic stage replay
   perception/
     vision.py          # YOLO pose + ByteTrack → fall/slump/motionless events
     audio.py           # microphone → scream/distress events
@@ -243,6 +256,7 @@ vigil/
   reasoning/
     prompts.py         # conservative re-triage policy + strict output schema
     triage.py          # Claude call + code-enforced ESI safety rules
+    rules.py           # integration-free Tier 0 reasoning
   escalation/
     ladder.py          # hold, patient check-in, or immediate nurse call
     elevenlabs_call.py # ElevenLabs calls and check-in transcript evaluation
@@ -251,6 +265,7 @@ vigil/
     abridge_note.py    # SOAP note + FHIR R4 transaction Bundle
   server/
     app.py             # FastAPI orchestration and application endpoints
+    command_api.py     # queue, replay, role, alert, intake, and audit API
     bus.py             # WebSocket event fan-out and isolated video frame buffer
     status.py          # live patient state exposed to the voice agent
     supabase_sink.py   # optional remote event mirror
@@ -265,6 +280,7 @@ supabase/
 web/                      # Next.js/Vercel command center
 tests/
   test_core.py           # fusion, escalation, ESI, vision, and FHIR safety tests
+  test_product_layer.py  # multi-patient, redaction, audit, intake, and replay tests
 ```
 
 ### Runtime event model
@@ -286,6 +302,18 @@ tests/
 - `GET /agent/patient-status` — token-protected live status for the voice agent
 - `GET /agent/patient-status/{patient_id}` — token-protected status by patient
 - `POST /webhooks/elevenlabs` — mirror completed call turns into the event log
+- `GET /api/v1/session` — role-filtered command-center state
+- `GET /api/v1/queue` — ranked, role-filtered re-triage queue
+- `POST /api/v1/demo/reset` — reset the deterministic stage scenario
+- `POST /api/v1/demo/advance` — advance one replay signal
+- `POST /api/v1/demo/replay` — run the complete replay automatically
+- `POST /api/v1/alerts/{id}/acknowledge` — close the nurse acknowledgement loop
+- `POST /api/v1/alerts/{id}/feedback` — record confirmed or false alarm feedback
+- `POST /api/v1/tracks/{id}/bind` — consent-aware manual track correction
+- `POST /api/v1/patients/{id}/esi` — monotonic clinician urgency override
+- `POST /api/v1/intake` — apply deterministic ESI floors and monitoring watch lists
+- `POST /api/v1/break-glass` — issue an audited 15-minute emergency grant
+- `GET /api/v1/audit/verify` — verify the complete hash chain
 
 Run the server with one Uvicorn worker because the event bus, camera frame buffer,
 and patient state are currently in process.
@@ -439,15 +467,19 @@ dataset.
 
 ## Demo narrative
 
-1. A patient completes a short video intake and receives an initial predicted ESI.
-2. The patient arrives and is linked to their synthetic chart and camera track.
-3. Vigil establishes a normal visual and vocal baseline.
-4. Their posture, movement, speech, or responsiveness changes while waiting.
-5. Vigil accumulates patient-specific evidence instead of reacting to one frame.
-6. It checks in with the patient when the evidence is ambiguous.
-7. Vigil raises urgency, for example ESI 3 → ESI 2, when warranted.
-8. The charge nurse receives a concise, chart-grounded call.
-9. The dashboard shows the evidence and safety reasoning.
-10. Vigil produces the SOAP note and FHIR incident bundle automatically.
+1. Reset the command center and show three independently monitored patients.
+2. Advance once. Maria Vega's posture departs from baseline, so Vigil starts an
+   accessible voice and text check-in without paging a nurse.
+3. Advance again. A respiratory signal corroborates the visual change. Cardiac
+   history and low charted oxygen saturation raise ESI 3 to ESI 2.
+4. Acknowledge the alert, then label it confirmed or false alarm to show the
+   evaluation feedback loop.
+5. Switch to Front desk. The response contains name, seat, wait time, and flagged
+   state, but no ESI, chart, evidence, or video fields.
+6. Switch to Compliance. Patient names disappear while the full hash chain remains.
+7. Continue the replay to show an ambiguous healthy-control signal and the
+   companion alarm routed to a different patient.
+8. Show the SOAP note, eight-resource FHIR bundle, source Provenance, and verified
+   audit head.
 
 **Vigil does not replace triage. It keeps triage from becoming stale.**

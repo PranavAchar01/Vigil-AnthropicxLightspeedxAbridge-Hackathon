@@ -121,7 +121,10 @@ def _mirror(event: BusEvent) -> None:
         summary = f"{p.get('modality')}: {p.get('kind')} ({p.get('confidence')})"
         source = str(p.get("modality"))
     elif t == "fused":
-        summary = f"⚑ {p.get('summary')} · {str(p.get('severity')).upper()} [{'+'.join(p.get('kinds', []))}]"
+        summary = (
+            f"{p.get('summary')} / {str(p.get('severity')).upper()} "
+            f"[{'+'.join(p.get('kinds', []))}]"
+        )
         source = "vision"
     elif t == "decision":
         summary = (

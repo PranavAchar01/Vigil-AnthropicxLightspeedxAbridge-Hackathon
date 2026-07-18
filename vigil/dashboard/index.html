@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1" />
-<title>Vigil — waiting-room re-triage</title>
+<title>Vigil | waiting-room re-triage</title>
 <link rel="stylesheet" href="/fonts.css" />
 <style>
   :root{
@@ -29,7 +29,7 @@
     display:flex;flex-direction:column;gap:13px;padding:13px;
     -webkit-font-smoothing:antialiased;
   }
-  /* matte grain so the frosted glass has something to diffuse — no gradients */
+  /* matte grain gives the frosted glass texture without decorative gradients */
   body::before{
     content:"";position:fixed;inset:0;z-index:-1;pointer-events:none;opacity:.06;
     background-image:url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='140' height='140'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.82' numOctaves='2' stitchTiles='stitch'/%3E%3C/filter%3E%3Crect width='100%25' height='100%25' filter='url(%23n)'/%3E%3C/svg%3E");
@@ -151,10 +151,10 @@
       </div>
     </div>
     <div class="card glass-sub">
-      <div class="row"><span class="k">Patient</span><span class="v" id="p-name">—</span></div>
-      <div class="row"><span class="k">Visit</span><span class="v" id="p-visit">—</span></div>
-      <div class="row"><span class="k">Baseline</span><span class="v" id="p-esi">—</span></div>
-      <div class="row"><span class="k">Vitals</span><span class="v" id="p-vitals">—</span></div>
+      <div class="row"><span class="k">Patient</span><span class="v" id="p-name">Pending</span></div>
+      <div class="row"><span class="k">Visit</span><span class="v" id="p-visit">Pending</span></div>
+      <div class="row"><span class="k">Baseline</span><span class="v" id="p-esi">Pending</span></div>
+      <div class="row"><span class="k">Vitals</span><span class="v" id="p-vitals">Pending</span></div>
       <div class="label">Active conditions</div>
       <div class="chips" id="p-conds"></div>
       <div class="label">Medications</div>
@@ -216,13 +216,13 @@ function line(html,cls){
 function chips(el,items){
   el.innerHTML="";
   (items||[]).slice(0,8).forEach(t=>{const c=document.createElement("span");c.className="chip";c.textContent=t;el.appendChild(c);});
-  if(!(items||[]).length){const c=document.createElement("span");c.className="chip";c.textContent="—";el.appendChild(c);}
+  if(!(items||[]).length){const c=document.createElement("span");c.className="chip";c.textContent="No data";el.appendChild(c);}
 }
 function setPatient(p){
   $("p-name").textContent=`${p.name} · ${p.age??"?"} · ${p.gender??""}`;
-  $("p-visit").textContent=p.visit||"—";
+  $("p-visit").textContent=p.visit||"Pending";
   $("p-esi").innerHTML=`<span class="esi-badge glass-sub">ESI ${p.baseline_esi}</span>`;
-  $("p-vitals").textContent=Object.entries(p.vitals||{}).map(([k,v])=>`${k} ${v}`).join(" · ")||"—";
+  $("p-vitals").textContent=Object.entries(p.vitals||{}).map(([k,v])=>`${k} ${v}`).join(" / ")||"Pending";
   chips($("p-conds"),p.conditions); chips($("p-meds"),p.medications);
 }
 function setBanner(txt,alert){ banner.textContent=txt; banner.className="glass-sub"+(alert?" alert":""); }
@@ -237,8 +237,8 @@ function handle(ev){
   }
   else if(type==="perception") line(`· ${p.modality}: ${p.kind} <span class="faint">(${p.confidence})</span>`,"faint");
   else if(type==="fused"){ traceFresh=true; deltaLine=null;
-    line(`⚑ ${p.summary} — ${p.severity.toUpperCase()} <span class="faint">[${p.kinds.join(" + ")}] conf ${p.confidence}</span>`,"signal"); }
-  else if(type==="reasoning_start") line(`Re-triaging ${p.patient} — prior ESI ${p.prior_esi}…`,"sys");
+    line(`${p.summary} / ${p.severity.toUpperCase()} <span class="faint">[${p.kinds.join(" + ")}] conf ${p.confidence}</span>`,"signal"); }
+  else if(type==="reasoning_start") line(`Re-triaging ${p.patient} / prior ESI ${p.prior_esi}`,"sys");
   else if(type==="reasoning_delta"){ if(!deltaLine) deltaLine=line("","reason"); deltaLine.textContent+=p.text; trace.scrollTop=trace.scrollHeight; }
   else if(type==="decision"){
     const changed=p.new_esi<p.prior_esi;
@@ -256,7 +256,7 @@ function handle(ev){
     logItem(`<b>call</b> ${s} <span class="faint">${p.message||p.conversation_id||p.error||""}</span>`);
   }
   else if(type==="escalation") logItem(`<b>${p.kind.replace(/_/g," ")}</b> → ${p.status} <span class="faint">${p.message||""}</span>`);
-  else if(type==="note"){ noteEl.textContent=p.text; $("bundle").textContent="FHIR ✓ "+(p.bundle_path||"").split("/").pop(); }
+  else if(type==="note"){ noteEl.textContent=p.text; $("bundle").textContent="FHIR ready: "+(p.bundle_path||"").split("/").pop(); }
 }
 
 const ws=new WebSocket(`ws://${location.host}/events`);
