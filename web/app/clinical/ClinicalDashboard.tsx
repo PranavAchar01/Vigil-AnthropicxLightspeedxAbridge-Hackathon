@@ -508,7 +508,7 @@ export default function ClinicalDashboard() {
             <div className="demo-progress" aria-label={`Demo step ${session.demo.step} of ${session.demo.total_steps}`}>
               <span style={{ width: `${(session.demo.step / session.demo.total_steps) * 100}%` }} />
             </div>
-            <span className="source-pill">{session.source === "backend" ? "Edge state" : "Stage-safe preview"}</span>
+            <span className="source-pill">{session.source === "backend" ? "Edge state" : "Local replay data"}</span>
             <button data-testid="reset-demo" type="button" onClick={() => void resetDemo()} disabled={commandBusy}>Reset</button>
             <button data-testid="next-signal" type="button" onClick={() => void runDemoStep()} disabled={commandBusy || session.demo.step >= 5}>Next signal</button>
             <button data-testid="run-replay" className="primary" type="button" onClick={() => void playDemo()} disabled={commandBusy || demoPlaying}>
