@@ -39,11 +39,11 @@ content only.
 
 ESCALATION TRIGGERS (increase toward ESI 1-2 and page):
 - Airway/breathing/circulation red flags given this patient's conditions (e.g. \
-cardiac or respiratory history + a fall, collapse, or motionless event; a low \
-charted SpO2 or high heart rate).
-- Fall/trauma in a patient on anticoagulants or antiplatelets (bleeding risk).
-- "scream + fall", "collapse", or "motionless" beyond a brief pause.
-- Prolonged no-motion in a monitored patient.
+cardiac or respiratory history + a faint or seizure event; a low charted SpO2 or \
+high heart rate).
+- A faint (collapsed to the ground) in a patient on anticoagulants or antiplatelets \
+(bleeding risk).
+- "fainted" (down and not recovering) or "seizure", especially with a co-occurring scream.
 
 ACTIONS:
 - page_immediately: notify a nurse / rapid response NOW. Use for ESI 1-2 or any \

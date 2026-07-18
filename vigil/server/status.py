@@ -58,10 +58,10 @@ def update_vision(pid: str, posture: str, motion_level: str, moved: bool) -> Non
 
 
 def mark_event(pid: str, kind: str) -> None:
-    """Discrete perception event (fall / collapse / seizure / unresponsive / scream / gesture)."""
+    """Discrete perception event (fainted / seizure / scream)."""
     with _LOCK:
         s = _STATUS.setdefault(pid, _default(pid))
-        if kind in ("fall", "collapse"):
+        if kind == "fainted":
             s["fall_detected"] = True
             s["last_fall_ts"] = _now_iso()
             s["posture"] = "on the floor"
@@ -69,10 +69,6 @@ def mark_event(pid: str, kind: str) -> None:
             s["fall_detected"] = True
             s["last_fall_ts"] = _now_iso()
             s["posture"] = "convulsing"
-        elif kind == "unresponsive":
-            s["fall_detected"] = True
-            s["last_fall_ts"] = _now_iso()
-            s["posture"] = "unresponsive / motionless"
         elif kind == "chest_clutch":
             s["posture"] = "clutching chest / in distress"
         elif kind == "scream":

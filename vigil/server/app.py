@@ -165,7 +165,7 @@ def _mirror(event: BusEvent) -> None:
 def _on_perception(ev: PerceptionEvent) -> None:
     """Runs on the loop thread (scheduled via call_soon_threadsafe)."""
     bus.publish(BusEvent(type="perception", payload=ev.model_dump()))
-    if ev.kind in ("fall", "collapse", "seizure", "unresponsive", "chest_clutch", "scream"):
+    if ev.kind in ("fainted", "seizure", "scream"):
         pid = state.active_id or _fallback_patient_id()
         if pid:
             pstatus.mark_event(pid, ev.kind)
@@ -291,6 +291,11 @@ def _start_vision(sink) -> None:
 
 
 def _start_audio(sink) -> None:
+    import os
+
+    if os.environ.get("VIGIL_DISABLE_AUDIO", "").lower() in ("1", "true", "yes"):
+        log.info("audio detection PAUSED (VIGIL_DISABLE_AUDIO set)")
+        return
     try:
         from vigil.perception.audio import run_audio
 

@@ -32,7 +32,7 @@ from vigil.tuning.optimizer import Param
 L_EL, R_EL = 7, 8
 H_FR = 480.0
 DT = 0.05
-HARD = {"fall", "collapse", "seizure", "unresponsive"}
+HARD = {"fainted", "seizure"}
 
 
 # --------------------------------------------------------------------------- #
@@ -105,7 +105,7 @@ def build_dataset(seed: int = 0) -> list[tuple[list, str | None]]:
         for i in range(11):
             f.append(pose(cx, cy0 + drop_px * i / 10, s, jitter=jit, rng=rng))
         f += _seq(lambda: pose(cx, cy0 + drop_px, s, jitter=jit, rng=rng), 0.6)
-        items.append((f, "fall"))
+        items.append((f, "fainted"))
 
     for v in variants(8):  # COLLAPSE (slump head-down, then still)
         s, cx, cy0, jit = v["s"], v["cx"], v["cy"], v["jit"]
@@ -113,7 +113,7 @@ def build_dataset(seed: int = 0) -> list[tuple[list, str | None]]:
         for i in range(10):
             f.append(pose(cx, cy0 + 2, s, head_dy=-0.7 + 0.11 * i, jitter=jit, rng=rng))
         f += _seq(lambda: pose(cx, cy0 + 2, s, head_dy=0.4, jitter=jit * 0.4, rng=rng), 3.4)
-        items.append((f, "collapse"))
+        items.append((f, "fainted"))
 
     for v in variants(8):  # SEIZURE
         s, cx, cy0, jit = v["s"], v["cx"], v["cy"], v["jit"]
@@ -197,7 +197,6 @@ def space() -> list[Param]:
         Param("seizure_motion", 1.2, 3.8),
         Param("seizure_osc", 3, 9, integer=True),
         Param("seizure_s", 0.6, 1.8),
-        Param("gesture_s", 0.8, 2.8),
         Param("slump_min_deg", 18.0, 34.0),
         Param("slump_s", 3.0, 7.5),
     ]

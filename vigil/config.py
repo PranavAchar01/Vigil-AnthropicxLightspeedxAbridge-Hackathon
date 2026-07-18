@@ -68,6 +68,10 @@ class Settings:
     twilio_account_sid: str = field(default_factory=lambda: _env("TWILIO_ACCOUNT_SID"))
     twilio_auth_token: str = field(default_factory=lambda: _env("TWILIO_AUTH_TOKEN"))
     twilio_from_number: str = field(default_factory=lambda: _env("TWILIO_FROM_NUMBER"))
+    # Optional scoped API Key (SID starts with 'SK') + Secret. Preferred over the
+    # Account Auth Token for auth when set; the Account SID is still used for the path.
+    twilio_api_key_sid: str = field(default_factory=lambda: _env("TWILIO_API_KEY_SID"))
+    twilio_api_key_secret: str = field(default_factory=lambda: _env("TWILIO_API_KEY_SECRET"))
 
     # --- Conversational agent live-status endpoint ---
     # Shared secret the agent's webhook tool sends in X-Vigil-Token; public base URL

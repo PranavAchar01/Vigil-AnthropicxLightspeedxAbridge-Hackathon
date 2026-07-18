@@ -4,13 +4,9 @@ Rebuilt for LAPTOP-WEBCAM framing (head + shoulders in view, hips usually NOT) a
 to cover every scenario a waiting-room patient might present, each as a distinct
 signal:
 
-    fall         rapid downward motion of head/shoulders → low/horizontal   (hard)
-    collapse     slump / head-drop, then goes motionless (faint / syncope)  (hard)
-    seizure      rapid oscillatory convulsion (many direction reversals)    (hard)
-    unresponsive prolonged stillness — loss of consciousness / passed out   (hard)
-    chest_clutch hands held to chest / throat / head (distress gesture)      (soft)
+    fainted      went down (fell / horizontal) and STAYED down >= 5s        (hard)
+    seizure      oscillatory convulsion sustained >= 5s                      (hard)
     slump        sustained posture degradation                              (soft)
-    motionless   brief stillness — early soft signal                        (soft)
 
 Everything is measured relative to shoulder width (scale-invariant to distance) and
 frame height (position), so it works up close on a laptop cam. Detection does NOT
@@ -78,8 +74,6 @@ class Params:
     seizure_osc: float = _f("VIGIL_SEIZURE_OSC", 5)  # direction reversals in window
     seizure_window_s: float = _f("VIGIL_SEIZURE_WINDOW_S", 1.6)
     seizure_s: float = _f("VIGIL_SEIZURE_S", 1.0)  # sustained before firing
-    # gesture (hand to chest / throat / head)
-    gesture_s: float = _f("VIGIL_GESTURE_S", 1.5)
     # slump
     slump_min_deg: float = _f("VIGIL_SLUMP_MIN_DEG", 26.0)
     slump_s: float = _f("VIGIL_SLUMP_S", 5.0)
@@ -133,7 +127,7 @@ class PersonState:
     still_since: float = 0.0
     faint_since: float = 0.0
     seizure_since: float = 0.0
-    gesture_since: float = 0.0
+    seizure_last: float = 0.0  # last frame the shaking was above threshold (hysteresis)
     slump_since: float = 0.0
     tremor_since: float = 0.0
     last_drop_ts: float = -1e9
@@ -170,12 +164,13 @@ class VisionDetector:
         return f"{self.st.fsm}  motion:{m.get('motion', 0):.1f}  drop:{m.get('drop', 0):.2f}"
 
     def _fire(self, ts: float, kind, conf: float, label: str) -> None:
-        cd = self.p.unresponsive_cooldown_s if kind == "unresponsive" else self.p.cooldown_s
+        # fainted/seizure get a long cooldown so one incident never re-pages the nurse.
+        cd = self.p.unresponsive_cooldown_s if kind in ("fainted", "seizure") else self.p.cooldown_s
         if ts - self.st.last_emit.get(kind, -1e9) < cd:
             return
         self.st.last_emit[kind] = ts
-        if kind in ("fall", "collapse"):
-            self.st.last_drop_ts = ts  # mark fall context so the tremor won't co-fire seizure
+        if kind == "fainted":
+            self.st.last_drop_ts = ts  # mark down-context so the tremor won't co-fire seizure
         self.flash = (label, ts)
         self.emit(
             PerceptionEvent(
@@ -356,70 +351,42 @@ class VisionDetector:
         low = cy >= self.p.low_cy
 
         # ============================ SCENARIO DETECTORS ========================
-        # 1) FALL — fast drop AND (horizontal OR ended up low)
-        if drop >= self.p.drop_frac and (horiz or low):
-            self.st.fall_since = self.st.fall_since or ts
-            if ts - self.st.fall_since >= self.p.fall_confirm_s:
-                conf = 0.65 + 0.2 * (drop >= 2 * self.p.drop_frac) + 0.15 * horiz
-                self._fire(ts, "fall", conf, "FALL DETECTED")
-                self.st.fsm = "down"
-        else:
-            self.st.fall_since = 0.0
-        # big sudden drop → fall immediately (fell straight down out of frame/chair)
-        if drop >= 2.4 * self.p.drop_frac and vy > 0.4:
-            self._fire(ts, "fall", 0.9, "FALL DETECTED")
+        # 1) FAINTED — the person goes DOWN (falls to the floor / lies horizontal /
+        # collapses) and STAYS down. VALIDATION: they must remain down for at least
+        # faint_s (5s) before we fire, so a trip-and-recover never pages the nurse.
+        # This replaces the old separate 'fall', 'collapse', and 'unresponsive' events
+        # — there is no standalone "fall detection".
+        truly_horizontal = torso_deg is not None and torso_deg >= self.p.torso_horiz_deg
+        big_drop = drop >= 2.4 * self.p.drop_frac and vy > 0.4  # fell straight down
+        if big_drop:
             self.st.fsm = "down"
-
-        # 2) SEIZURE — oscillatory shaking
-        if seizure_energy >= self.p.seizure_motion and reversals >= self.p.seizure_osc:
-            self.st.seizure_since = self.st.seizure_since or ts
-            if ts - self.st.seizure_since >= self.p.seizure_s:
-                self._fire(ts, "seizure", min(0.6 + 0.05 * reversals, 0.95), "SEIZURE DETECTED")
-        else:
-            self.st.seizure_since = 0.0
-
-        # 3) COLLAPSE / FAINT — down-ish posture that goes still
-        down_posture = (
-            head_below or horiz or self.st.fsm == "down" or drop >= 0.6 * self.p.drop_frac
+        went_down = (
+            (drop >= self.p.drop_frac and (horiz or low))  # a fall to the ground
+            or truly_horizontal                             # lying / horizontal torso
+            or self.st.fsm == "down"                        # already registered as down
         )
-        if down_posture and still:
+        if went_down:
+            self.st.fsm = "down"
             self.st.faint_since = self.st.faint_since or ts
-            if ts - self.st.faint_since >= self.p.faint_s:
-                self._fire(ts, "collapse", 0.85, "COLLAPSE / FAINT")
-                self.st.fsm = "down"
+            if ts - self.st.faint_since >= self.p.faint_s:  # ON THE GROUND >= 5s
+                self._fire(ts, "fainted", 0.9, "FAINTED — down 5s, not recovering")
         else:
             self.st.faint_since = 0.0
 
-        # 4) MOTIONLESS (soft) → UNRESPONSIVE (hard) — prolonged stillness
-        if still:
-            self.st.still_since = self.st.still_since or ts
-            dur = ts - self.st.still_since
-            if dur >= self.p.unresponsive_s:
-                self._fire(ts, "unresponsive", 0.8, "UNRESPONSIVE")
-            elif dur >= self.p.motionless_s:
-                self._fire(ts, "motionless", 0.6, "motionless")
-        else:
-            self.st.still_since = 0.0
+        # 2) SEIZURE — oscillatory shaking sustained >= seizure_s (5s) before firing.
+        # Brief dips in the signal are NORMAL in a real convulsion, so we don't reset
+        # the timer on a single low frame — only after the shaking has clearly STOPPED
+        # for > 1s. This is what lets a genuine 5s+ seizure fire despite fluctuation.
+        seizing_now = seizure_energy >= self.p.seizure_motion and reversals >= self.p.seizure_osc
+        if seizing_now:
+            self.st.seizure_since = self.st.seizure_since or ts
+            self.st.seizure_last = ts
+            if ts - self.st.seizure_since >= self.p.seizure_s:  # SEIZING >= 5s
+                self._fire(ts, "seizure", min(0.6 + 0.05 * reversals, 0.95), "SEIZURE DETECTED")
+        elif ts - self.st.seizure_last > 2.0:  # shaking clearly stopped (> 2s) -> reset
+            self.st.seizure_since = 0.0
 
-        # 5) CHEST_CLUTCH — a wrist held near the center of chest / throat / head
-        clutch = False
-        top_y = min(head[1], sh_mid[1]) - 0.3 * scale
-        bot_y = sh_mid[1] + 1.3 * scale
-        for wr in (L_WR, R_WR):
-            if not vis[wr]:
-                continue
-            near_x = abs(kp[wr][0] - sh_mid[0]) < 0.7 * scale
-            in_core = top_y <= kp[wr][1] <= bot_y
-            if near_x and in_core:
-                clutch = True
-        if clutch:
-            self.st.gesture_since = self.st.gesture_since or ts
-            if ts - self.st.gesture_since >= self.p.gesture_s:
-                self._fire(ts, "chest_clutch", 0.6, "DISTRESS GESTURE")
-        else:
-            self.st.gesture_since = 0.0
-
-        # 6) SLUMP — sustained lean (upright but degraded posture)
+        # 3) SLUMP — sustained lean (upright but degraded posture)
         if self.st.fsm == "upright":
             slumping = (
                 torso_deg is not None and self.p.slump_min_deg <= torso_deg < self.p.torso_horiz_deg
@@ -442,8 +409,6 @@ class VisionDetector:
         posture = (
             "on the floor"
             if self.st.fsm == "down"
-            else "clutching chest"
-            if clutch
             else "slumped"
             if slumping
             else "upright"
@@ -554,15 +519,15 @@ class FallModelDetector:
             self.center_prev = None
             self.last = {"fallen": False, "conf": 0.0, "box": None}
             return
+        # No immediate 'fall' event — validation requires staying down. Fire 'fainted'
+        # only after a fallen box stays put for faint_s (>= 5s on the ground).
         self.fallen_since = self.fallen_since or ts
-        if ts - self.fallen_since >= self.confirm_s:
-            self._fire(ts, "fall", best_conf)
         center = np.array([(box[0] + box[2]) / 2.0 / W, (box[1] + box[3]) / 2.0 / H])
         if self.center_prev is not None:
             if float(np.linalg.norm(center - self.center_prev)) < self.still_frac:
                 self.still_since = self.still_since or ts
                 if ts - self.still_since >= self.faint_s:
-                    self._fire(ts, "collapse", min(best_conf + 0.1, 0.99))
+                    self._fire(ts, "fainted", min(best_conf + 0.1, 0.99))
             else:
                 self.still_since = 0.0
         self.center_prev = center

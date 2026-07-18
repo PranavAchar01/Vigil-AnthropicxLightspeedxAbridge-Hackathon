@@ -35,15 +35,12 @@ class Action(str, Enum):
 
 # Discrete signals the perception layer can raise.
 PerceptionKind = Literal[
-    "fall",  # rapid drop to ground / horizontal (hard)
-    "collapse",  # slump/drop then motionless — faint/syncope (hard)
-    "seizure",  # rapid oscillatory convulsion (hard)
-    "unresponsive",  # prolonged stillness — LOC / passed out (hard)
+    "fainted",  # went down (fell / horizontal) and STAYED down >= 5s (hard)
+    "seizure",  # oscillatory convulsion sustained >= 5s (hard)
     "scream",  # audio distress vocalization (hard)
-    "motionless",  # brief stillness — early soft signal
     "slump",  # sustained posture degradation (soft)
-    "agitation",  # restlessness / pacing (soft)
-    "chest_clutch",  # hands to chest / throat / head — distress gesture (soft)
+    # deprecated — no longer emitted, kept so old serialized events still validate:
+    "fall", "collapse", "unresponsive", "motionless", "agitation", "chest_clutch",
 ]
 
 
