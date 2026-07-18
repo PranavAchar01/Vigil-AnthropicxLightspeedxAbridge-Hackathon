@@ -105,6 +105,8 @@ class Settings:
     cohort_path: Path = field(
         default_factory=lambda: Path(__file__).resolve().parent.parent / "data" / "demo_cohort.json"
     )
+    # Vision input: "0" = default webcam; or a path to a video/image file (demo/testing).
+    video_source: str = field(default_factory=lambda: _env("VIGIL_VIDEO_SOURCE", "0"))
     # Dedicated pre-trained fall-detection YOLO (runs alongside the pose FSM).
     fall_model_path: Path = field(
         default_factory=lambda: Path(

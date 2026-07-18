@@ -201,3 +201,68 @@ def test_fall_model_no_detection_is_quiet():
         d._update(None, None, 480.0, 640.0, ts)
         ts += DT
     assert d.emitted == []
+
+
+def test_fall_model_geometry_gate():
+    """Geometry gate: wide OR low-in-frame keeps real falls; tall + mid-frame (a
+    standing/walking person) is rejected."""
+    d = object.__new__(FallModelDetector)
+    d.fallen_ids = {0}
+    d.max_aspect, d.low_aspect, d.low_cy = 1.10, 1.40, 0.78
+    H = 480.0
+    tall = np.array([100, 50, 180, 250])  # aspect 2.5, center_y 0.31 -> upright, REJECT
+    wide = np.array([100, 300, 320, 440])  # aspect 0.64 -> on the ground, ACCEPT
+    low_compact = np.array([100, 330, 220, 480])  # aspect 1.25, center_y 0.84 -> ACCEPT
+    high_compact = np.array([100, 30, 220, 180])  # aspect 1.25, center_y 0.22 -> REJECT
+
+    def pick(box, conf=0.9):
+        return d._pick_fallen(np.array([0]), np.array([conf]), np.array([box]), H)[0]
+
+    assert pick(tall) is None
+    assert pick(wide) == 0.9
+    assert pick(low_compact) == 0.9  # a fall whose box is compact but low in frame
+    assert pick(high_compact) is None  # compact but high => not on the ground
+    # both a standing box (higher conf) and a real wide fall: keep the fall
+    assert (
+        d._pick_fallen(np.array([0, 0]), np.array([0.99, 0.80]), np.array([tall, wide]), H)[0]
+        == 0.80
+    )
+
+
+def test_tremor_seizure_detector():
+    """Frame-difference seizure detector: sustained moderate in-place motion fires
+    'seizure'; a still person does not."""
+    d = object.__new__(VisionDetector)
+    d.p = Params()
+    d.st = PersonState()
+    d.metrics = {}
+    d.flash = None
+    d._prev_gray = None
+    d._tremor_ema = 0.0
+    d._prev_box_center = None
+    d.emitted = []
+    d.emit = d.emitted.append
+    box = np.array([50, 50, 250, 350])  # stationary person box
+    base = np.full((400, 300, 3), 100, np.uint8)
+    rng = np.random.default_rng(0)
+    mask = rng.random((300, 200)) < 0.08  # ~8% of box pixels -> tremor band
+
+    ts = 100.0
+    for i in range(50):  # ~2.5s of sustained subtle motion in place
+        fr = base.copy()
+        if i % 2:
+            fr[50:350, 50:250][mask] = 170
+        d._tremor(fr, box, ts)
+        ts += 0.05
+    assert any(e.kind == "seizure" for e in d.emitted)
+
+    # a perfectly still person must NOT fire
+    d.st = PersonState()
+    d._prev_gray = None
+    d._tremor_ema = 0.0
+    d._prev_box_center = None
+    d.emitted = []
+    d.emit = d.emitted.append
+    for i in range(50):
+        d._tremor(base.copy(), box, 200.0 + i * 0.05)
+    assert not any(e.kind == "seizure" for e in d.emitted)

@@ -42,3 +42,8 @@ data/face_gallery.json
 # Tuning run artifacts (config/tuned.env — the promoted params — IS committed)
 config/tuning_report.json
 config/*.jsonl
+
+# Real team members" fall/seizure test footage — keep LOCAL, never publish
+data/sahiel/
+*.mov
+*.MOV

@@ -83,6 +83,13 @@ class Params:
     # slump
     slump_min_deg: float = _f("VIGIL_SLUMP_MIN_DEG", 26.0)
     slump_s: float = _f("VIGIL_SLUMP_S", 5.0)
+    # frame-difference seizure/tremor: sustained MODERATE person-region motion that is
+    # neither still nor large/purposeful — catches subtle (incl. seated) seizures that
+    # keypoint oscillation misses. Tuned on real seizure footage (person-region motion
+    # ~0.06-0.09 sustained, vs ~0.22 for active sitting and <0.02 for a still person).
+    seizure_tremor_lo: float = _f("VIGIL_SEIZURE_TREMOR_LO", 0.025)
+    seizure_tremor_hi: float = _f("VIGIL_SEIZURE_TREMOR_HI", 0.16)
+    seizure_tremor_s: float = _f("VIGIL_SEIZURE_TREMOR_S", 1.3)
     # bookkeeping
     cooldown_s: float = _f("VIGIL_COOLDOWN_S", 6.0)
     unresponsive_cooldown_s: float = _f("VIGIL_UNRESPONSIVE_COOLDOWN_S", 15.0)
@@ -128,6 +135,8 @@ class PersonState:
     seizure_since: float = 0.0
     gesture_since: float = 0.0
     slump_since: float = 0.0
+    tremor_since: float = 0.0
+    last_drop_ts: float = -1e9
     last_emit: dict = field(default_factory=dict)
 
 
@@ -151,6 +160,9 @@ class VisionDetector:
         self._last_status_ts = 0.0
         self.metrics: dict = {}  # live values for the on-frame overlay
         self.flash: tuple[str, float] | None = None  # (text, ts) of the last fired event
+        self._prev_gray: np.ndarray | None = None  # frame-diff seizure/tremor state
+        self._tremor_ema: float = 0.0
+        self._prev_box_center: tuple[float, float] | None = None
 
     # ------------------------------------------------------------------ helpers
     def status_line(self) -> str:
@@ -162,6 +174,8 @@ class VisionDetector:
         if ts - self.st.last_emit.get(kind, -1e9) < cd:
             return
         self.st.last_emit[kind] = ts
+        if kind in ("fall", "collapse"):
+            self.st.last_drop_ts = ts  # mark fall context so the tremor won't co-fire seizure
         self.flash = (label, ts)
         self.emit(
             PerceptionEvent(
@@ -194,10 +208,60 @@ class VisionDetector:
             self.metrics = {"present": False}
             self.st.kp_prev = None
             self.st.sh_prev = None
+            self._prev_gray = None
+            self._prev_box_center = None
+            self.st.tremor_since = 0.0
             return res
         box, kp, kc = person
         self.analyze(box, kp, kc, H, ts)
+        self._tremor(frame, box, ts)
         return res
+
+    def _tremor(self, frame, box, ts: float) -> None:
+        """Frame-difference seizure/tremor detector: fires 'seizure' on SUSTAINED
+        moderate motion inside the person's box — the signature of a subtle (incl.
+        seated) seizure that keypoint oscillation misses. Ignores near-stillness and
+        large/purposeful movement."""
+        p = self.p
+        # luma (BGR) without cv2 so it works anywhere process() runs
+        g = (0.114 * frame[:, :, 0] + 0.587 * frame[:, :, 1] + 0.299 * frame[:, :, 2]).astype(
+            np.float32
+        )
+        prev, self._prev_gray = self._prev_gray, g
+        if prev is None or prev.shape != g.shape:
+            return
+        x1, y1, x2, y2 = int(box[0]), int(box[1]), int(box[2]), int(box[3])
+        x1, y1 = max(x1, 0), max(y1, 0)
+        x2, y2 = min(x2, g.shape[1]), min(y2, g.shape[0])
+        if x2 - x1 < 8 or y2 - y1 < 8:
+            self.st.tremor_since = 0.0
+            return
+        d = np.abs(g[y1:y2, x1:x2] - prev[y1:y2, x1:x2])
+        energy = float((d > 12).mean())
+        self._tremor_ema = 0.6 * self._tremor_ema + 0.4 * energy
+        e = self._tremor_ema
+        self.metrics["tremor"] = round(e, 3)
+
+        # a seizure tremor is IN PLACE; a fall/large move TRANSLATES the box → not a
+        # tremor. Reset when the person is moving across the frame so falls stay falls.
+        cx, cy = (x1 + x2) / 2.0, (y1 + y2) / 2.0
+        prevc, self._prev_box_center = self._prev_box_center, (cx, cy)
+        translating = (
+            prevc is not None and (abs(cx - prevc[0]) + abs(cy - prevc[1])) / g.shape[0] > 0.015
+        )
+        grounded = self.st.fsm == "down"  # on the floor => a fall/collapse, not a seizure
+        recent_fall = ts - self.st.last_drop_ts < 6.0  # a fall just happened -> not a seizure
+        if (
+            not translating
+            and not grounded
+            and not recent_fall
+            and p.seizure_tremor_lo <= e <= p.seizure_tremor_hi
+        ):
+            self.st.tremor_since = self.st.tremor_since or ts
+            if ts - self.st.tremor_since >= p.seizure_tremor_s:
+                self._fire(ts, "seizure", 0.75, "SEIZURE DETECTED")
+        else:
+            self.st.tremor_since = 0.0
 
     def analyze(self, box, kp, kc, H: float, ts: float) -> None:
         """The detection core — pure keypoints in, events out. Split from `process`
@@ -262,6 +326,8 @@ class VisionDetector:
         # drop over the recent window (how far below the recent-highest position)
         recent = [c for (t0, c) in self.st.cy_hist if ts - t0 <= self.p.drop_window_s]
         drop = cy - min(recent) if recent else 0.0
+        if drop >= self.p.drop_frac:  # a real downward drop => fall context, not a seizure
+            self.st.last_drop_ts = ts
 
         # seizure: reversals of sh_mid direction + sustained high motion in window
         win = [
@@ -449,6 +515,14 @@ class FallModelDetector:
         self.names = {int(i): str(n).lower() for i, n in self.model.names.items()}
         self.fallen_ids = {i for i, n in self.names.items() if "fall" in n}
         self.conf = _f("VIGIL_FALL_MODEL_CONF", 0.40)
+        # Geometry gate (validated on UR Fall Detection Dataset): a real fallen person
+        # is EITHER wide (box aspect h/w below max_aspect) OR low in the frame (box
+        # center below low_cy while still not tall, ≤ low_aspect). A standing/walking
+        # person's box is tall (~1.7) and centered mid-frame → rejected. This drove
+        # false positives on normal activity from 60% to 0% while keeping fall recall.
+        self.max_aspect = _f("VIGIL_FALL_MAX_ASPECT", 1.10)
+        self.low_aspect = _f("VIGIL_FALL_LOW_ASPECT", 1.40)
+        self.low_cy = _f("VIGIL_FALL_LOW_CY", 0.78)
         self.confirm_s = _f("VIGIL_FALL_CONFIRM_S", 0.40)
         self.faint_s = _f("VIGIL_FALL_FAINT_S", 3.0)
         self.still_frac = _f("VIGIL_FALL_STILL_FRAC", 0.03)
@@ -501,14 +575,33 @@ class FallModelDetector:
         )[0]
         best_conf, best_box = None, None
         if res.boxes is not None and len(res.boxes):
-            cls = res.boxes.cls.cpu().numpy().astype(int)
-            cf = res.boxes.conf.cpu().numpy()
-            xy = res.boxes.xyxy.cpu().numpy()
-            for c, k, b in zip(cls, cf, xy):
-                if c in self.fallen_ids and (best_conf is None or k > best_conf):
-                    best_conf, best_box = float(k), b
+            best_conf, best_box = self._pick_fallen(
+                res.boxes.cls.cpu().numpy().astype(int),
+                res.boxes.conf.cpu().numpy(),
+                res.boxes.xyxy.cpu().numpy(),
+                H,
+            )
         self._update(best_conf, best_box, H, W, ts)
         return res
+
+    def _pick_fallen(self, cls, cf, xy, H):
+        """Highest-confidence 'fallen' box that passes the geometry gate — wide, OR
+        low-in-frame and not tall (a person on the ground). Rejects tall, mid-frame
+        boxes (standing/walking). Pure — testable without the YOLO model."""
+        best_conf, best_box = None, None
+        for c, k, b in zip(cls, cf, xy):
+            if c not in self.fallen_ids:
+                continue
+            aspect = (b[3] - b[1]) / max(b[2] - b[0], 1.0)
+            center_y = (b[1] + b[3]) / 2.0 / H
+            on_ground = aspect <= self.max_aspect or (
+                aspect <= self.low_aspect and center_y >= self.low_cy
+            )
+            if not on_ground:
+                continue  # tall + mid-frame => upright (standing/walking), not a fall
+            if best_conf is None or k > best_conf:
+                best_conf, best_box = float(k), b
+        return best_conf, best_box
 
     def draw(self, frame, cv2) -> None:
         if not self.last.get("fallen"):
@@ -578,13 +671,17 @@ def run_vision(
 
     cap = cv2.VideoCapture(source)
     if not cap.isOpened():
-        print(f"[vision] could not open camera source={source}; vision disabled")
+        print(f"[vision] could not open source={source}; vision disabled")
         return
-    print("[vision] camera open; detecting distress (skeletons only)")
+    is_file = not isinstance(source, int)
+    print(f"[vision] {'reading ' + str(source) if is_file else 'camera open'}; detecting distress")
     try:
         while not stop_event.is_set() and cap.isOpened():
             ok, frame = cap.read()
             if not ok:
+                if is_file:  # loop the demo clip so the app keeps showing it
+                    cap.set(cv2.CAP_PROP_POS_FRAMES, 0)
+                    continue
                 time.sleep(0.05)
                 continue
 

@@ -276,11 +276,13 @@ def _start_vision(sink) -> None:
     try:
         from vigil.perception.vision import run_vision
 
+        src = settings.video_source
+        source = int(src) if src.lstrip("-").isdigit() else src  # camera index or file path
         run_vision(
             sink,
             frames,
             state.stop,
-            source=0,
+            source=source,
             status_sink=_vision_status,
             identify_sink=_vision_identify,
         )
