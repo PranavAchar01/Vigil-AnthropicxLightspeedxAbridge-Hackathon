@@ -1,0 +1,35 @@
+# env / secrets
+.env
+.env.local
+
+# python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+*.egg-info/
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+
+# models / weights (downloaded at runtime)
+*.pt
+*.onnx
+*.tflite
+yamnet*/
+
+# uv
+uv.lock
+
+# os
+.DS_Store
+
+# runtime capture / recordings
+recordings/
+*.mp4
+
+# runtime incident bundles (regenerated per run)
+data/incidents/
+
+# Abridge-provided synthetic data (regenerate via scripts/extract_demo_cohort.py)
+data/demo_cohort.json

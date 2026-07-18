@@ -1,0 +1,269 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>Vigil — waiting-room re-triage</title>
+<link rel="stylesheet" href="/fonts.css" />
+<style>
+  :root{
+    --bg:#000000;
+    --t1:rgba(255,255,255,.92);
+    --t2:rgba(255,255,255,.54);
+    --t3:rgba(255,255,255,.34);
+    --live:#8fbbb2;          /* muted sage-teal, no glow */
+    --signal:#c9ab7c;        /* muted warm amber */
+    --alert:#d67b7b;         /* desaturated red */
+    --alert-ink:#edaaaa;
+    --hair:rgba(255,255,255,.10);
+    --hair-soft:rgba(255,255,255,.05);
+    --glass:rgba(255,255,255,.045);
+    --radius:22px;
+    --font:"CMU Serif",Georgia,"Times New Roman",serif;
+    --mono:"CMU Typewriter",ui-monospace,SFMono-Regular,Menlo,monospace;
+  }
+  *{box-sizing:border-box}
+  html,body{height:100%}
+  body{
+    margin:0;font-family:var(--font);color:var(--t1);background:var(--bg);
+    display:flex;flex-direction:column;gap:13px;padding:13px;
+    -webkit-font-smoothing:antialiased;
+  }
+  /* matte grain so the frosted glass has something to diffuse — no gradients */
+  body::before{
+    content:"";position:fixed;inset:0;z-index:-1;pointer-events:none;opacity:.06;
+    background-image:url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='140' height='140'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.82' numOctaves='2' stitchTiles='stitch'/%3E%3C/filter%3E%3Crect width='100%25' height='100%25' filter='url(%23n)'/%3E%3C/svg%3E");
+  }
+
+  .glass{
+    background:var(--glass);border:1px solid var(--hair);border-radius:var(--radius);
+    backdrop-filter:blur(34px) saturate(1.3);-webkit-backdrop-filter:blur(34px) saturate(1.3);
+    box-shadow:0 12px 40px rgba(0,0,0,.5), inset 0 1px 0 rgba(255,255,255,.08),
+      inset 0 0 0 1px rgba(255,255,255,.015);
+  }
+  .glass-sub{
+    background:var(--glass);border:1px solid var(--hair);border-radius:15px;
+    backdrop-filter:blur(18px);-webkit-backdrop-filter:blur(18px);
+    box-shadow:inset 0 1px 0 rgba(255,255,255,.06);
+  }
+
+  .topbar{display:flex;align-items:center;gap:15px;padding:12px 18px}
+  .brand-name{font-weight:700;font-size:19px;letter-spacing:.28em;text-transform:uppercase}
+  .sub{color:var(--t2);font-size:13px;letter-spacing:.01em}
+  .spacer{flex:1}
+  .conn{display:flex;align-items:center;gap:8px;padding:7px 13px;border-radius:999px;font-size:12.5px;color:var(--t2)}
+  .conn .dot{width:8px;height:8px;border-radius:50%;background:var(--t3);transition:background .3s}
+  .conn.live .dot{background:var(--live);animation:breathe 2.6s ease-in-out infinite}
+  .conn.down .dot{background:var(--alert)}
+  @keyframes breathe{0%,100%{opacity:1}50%{opacity:.35}}
+
+  .glass-icon{display:grid;place-items:center;width:36px;height:36px;border-radius:12px;
+    background:var(--glass);border:1px solid var(--hair);color:var(--t1);
+    box-shadow:inset 0 1px 0 rgba(255,255,255,.12), inset 0 -6px 12px rgba(0,0,0,.35);
+    backdrop-filter:blur(16px);-webkit-backdrop-filter:blur(16px)}
+  .glass-icon svg{width:18px;height:18px}
+  .glass-icon.lg{width:56px;height:56px;border-radius:18px}
+  .glass-icon.lg svg{width:27px;height:27px}
+
+  .grid{flex:1;display:grid;grid-template-columns:1.12fr 1fr 368px;gap:13px;min-height:0}
+  .panel{padding:16px 16px 10px;display:flex;flex-direction:column;min-height:0}
+  .phead{display:flex;align-items:center;gap:11px;margin-bottom:14px}
+  .ptitle{font-size:12px;text-transform:uppercase;letter-spacing:.16em;color:var(--t2)}
+
+  .videoframe{position:relative;width:100%;aspect-ratio:4/3;border-radius:16px;overflow:hidden;flex:0 0 auto}
+  #cam{width:100%;height:100%;object-fit:cover;display:block}
+  .cam-standby{position:absolute;inset:0;display:flex;flex-direction:column;align-items:center;
+    justify-content:center;gap:13px;color:var(--t2);font-size:13px;letter-spacing:.04em}
+
+  .card{padding:14px;margin-top:12px}
+  .row{display:flex;justify-content:space-between;gap:10px;padding:6px 0;font-size:14px}
+  .row+.row{border-top:1px solid var(--hair-soft)}
+  .k{color:var(--t2)} .v{color:var(--t1);text-align:right}
+  .label{color:var(--t2);font-size:11px;text-transform:uppercase;letter-spacing:.12em;margin:12px 0 7px}
+  .chips{display:flex;flex-wrap:wrap;gap:7px}
+  .chip{border-radius:999px;padding:4px 11px;font-size:12px;color:var(--t2);
+    background:var(--glass);border:1px solid var(--hair);backdrop-filter:blur(12px)}
+  .esi-badge{display:inline-flex;align-items:center;gap:6px;padding:4px 12px;border-radius:999px;font-size:13px;color:var(--t1)}
+
+  #trace{flex:1;overflow-y:auto;font:13.5px/1.7 var(--mono);white-space:pre-wrap;padding-right:6px}
+  .line{margin:3px 0}
+  .faint{color:var(--t3)} .sys{color:var(--t2)} .reason{color:var(--t1)} .signal{color:var(--signal)}
+  .decision{margin-top:12px;padding:14px}
+  .decision.esc{border-color:rgba(214,123,123,.34);background:rgba(214,123,123,.08)}
+  .esi{display:inline-flex;align-items:center;gap:10px;font-weight:700}
+  .esi b{font-size:30px;line-height:1}
+  .arrow{color:var(--alert)}
+  .spoken{color:var(--t2);margin-top:9px;font-family:var(--font);font-style:italic;font-size:14px}
+  .tag{font-size:11px;letter-spacing:.08em;color:var(--alert-ink);border:1px solid rgba(214,123,123,.32);
+    border-radius:7px;padding:2px 8px;margin-left:9px;font-family:var(--font)}
+
+  #banner{border-radius:16px;padding:22px 16px;text-align:center;font-weight:700;font-size:18px;
+    letter-spacing:.02em;color:var(--t2);transition:color .3s,background .3s,border-color .3s}
+  #banner.alert{color:var(--alert-ink);background:rgba(214,123,123,.10);border-color:rgba(214,123,123,.34);
+    animation:soft 1.4s ease-in-out infinite}
+  @keyframes soft{0%,100%{opacity:1}50%{opacity:.6}}
+
+  .caps{display:flex;gap:7px;margin-top:11px;flex-wrap:wrap}
+  .cap{display:flex;align-items:center;gap:6px;font-size:11px;letter-spacing:.05em;color:var(--t3);
+    padding:5px 10px;border-radius:999px;background:var(--glass);border:1px solid var(--hair)}
+  .cap .d{width:6px;height:6px;border-radius:50%;background:var(--t3)}
+  .cap.on{color:var(--t1)} .cap.on .d{background:var(--live)}
+
+  .log{margin-top:11px;flex:0 0 auto;max-height:132px;overflow-y:auto;padding:4px 12px}
+  .log .item{padding:8px 0;border-bottom:1px solid var(--hair-soft);color:var(--t2);font-size:12.5px}
+  .log .item:last-child{border-bottom:none}
+  .log .item b{color:var(--t1)}
+  #note{flex:1;overflow-y:auto;margin-top:11px;padding:13px;font:12.5px/1.65 var(--mono);white-space:pre-wrap;color:var(--t2)}
+  .pill{font-size:10px;letter-spacing:.06em;padding:2px 8px;border-radius:8px;background:var(--glass);
+    border:1px solid var(--hair);color:var(--t2);margin-left:8px;vertical-align:middle;font-family:var(--mono)}
+
+  ::-webkit-scrollbar{width:8px}::-webkit-scrollbar-thumb{background:rgba(255,255,255,.12);border-radius:8px}
+  @media (prefers-reduced-motion:reduce){*{animation:none!important}}
+</style>
+</head>
+<body>
+
+<header class="topbar glass">
+  <span class="glass-icon" aria-hidden="true">
+    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><path d="M2.06 12.35a1 1 0 0 1 0-.7 10.75 10.75 0 0 1 19.88 0 1 1 0 0 1 0 .7 10.75 10.75 0 0 1-19.88 0"/><circle cx="12" cy="12" r="3"/></svg>
+  </span>
+  <span class="brand-name">Vigil</span>
+  <span class="sub">continuous re-triage · waiting room camera 01 · skeletons only</span>
+  <span class="spacer"></span>
+  <span class="conn glass-sub" id="conn"><span class="dot"></span><span id="conn-text">Connecting…</span></span>
+</header>
+
+<main class="grid">
+  <section class="panel glass">
+    <div class="phead">
+      <span class="glass-icon" aria-hidden="true">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><path d="m16 13 5.22 3.48a.5.5 0 0 0 .78-.42V7.94a.5.5 0 0 0-.75-.43L16 10.5"/><rect x="2" y="6" width="14" height="12" rx="2"/></svg>
+      </span>
+      <span class="ptitle">Live skeleton view</span>
+    </div>
+    <div class="videoframe glass-sub">
+      <img id="cam" alt="" />
+      <div class="cam-standby" id="cam-standby">
+        <span class="glass-icon lg" aria-hidden="true">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="m16 13 5.22 3.48a.5.5 0 0 0 .78-.42V7.94a.5.5 0 0 0-.75-.43L16 10.5"/><rect x="2" y="6" width="14" height="12" rx="2"/></svg>
+        </span>
+        <span>Camera standby</span>
+      </div>
+    </div>
+    <div class="card glass-sub">
+      <div class="row"><span class="k">Patient</span><span class="v" id="p-name">—</span></div>
+      <div class="row"><span class="k">Visit</span><span class="v" id="p-visit">—</span></div>
+      <div class="row"><span class="k">Baseline</span><span class="v" id="p-esi">—</span></div>
+      <div class="row"><span class="k">Vitals</span><span class="v" id="p-vitals">—</span></div>
+      <div class="label">Active conditions</div>
+      <div class="chips" id="p-conds"></div>
+      <div class="label">Medications</div>
+      <div class="chips" id="p-meds"></div>
+    </div>
+  </section>
+
+  <section class="panel glass">
+    <div class="phead">
+      <span class="glass-icon" aria-hidden="true">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><path d="M22 12h-2.48a2 2 0 0 0-1.93 1.46l-2.35 8.36a.25.25 0 0 1-.48 0L9.24 2.18a.25.25 0 0 0-.48 0l-2.35 8.36A2 2 0 0 1 4.49 12H2"/></svg>
+      </span>
+      <span class="ptitle">Agent reasoning trace</span>
+    </div>
+    <div id="trace"><span class="sys">Monitoring… waiting for a signal.</span></div>
+  </section>
+
+  <section class="panel glass">
+    <div class="phead">
+      <span class="glass-icon" aria-hidden="true">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><path d="M13.83 16.57a1 1 0 0 0 1.21-.3l.36-.47A2 2 0 0 1 17 15h3a2 2 0 0 1 2 2v3a2 2 0 0 1-2 2A18 18 0 0 1 2 4a2 2 0 0 1 2-2h3a2 2 0 0 1 2 2v3a2 2 0 0 1-.8 1.6l-.47.35a1 1 0 0 0-.29 1.23 14 14 0 0 0 6.39 6.38"/></svg>
+      </span>
+      <span class="ptitle">Escalation</span>
+    </div>
+    <div id="banner" class="glass-sub">Monitoring</div>
+    <div class="caps" id="caps">
+      <span class="cap" data-cap="reasoning"><span class="d"></span>reasoning</span>
+      <span class="cap" data-cap="nurse_call"><span class="d"></span>nurse call</span>
+      <span class="cap" data-cap="patient_checkin"><span class="d"></span>check-in</span>
+      <span class="cap" data-cap="camera"><span class="d"></span>camera</span>
+    </div>
+    <div class="log glass-sub" id="log"></div>
+    <div class="phead" style="margin-top:14px">
+      <span class="ptitle">Ambient SOAP note</span><span class="pill" id="bundle">FHIR</span>
+    </div>
+    <div id="note" class="glass-sub"><span class="sys">No incident yet.</span></div>
+  </section>
+</main>
+
+<script>
+const $ = id => document.getElementById(id);
+const trace=$("trace"), banner=$("banner"), logEl=$("log"), noteEl=$("note"),
+      conn=$("conn"), connText=$("conn-text"), cam=$("cam"), camStandby=$("cam-standby");
+let traceFresh=true, deltaLine=null;
+
+cam.onload=()=>{ if(cam.naturalWidth){ camStandby.style.display="none"; setCap("camera",true); } };
+cam.onerror=()=>{ camStandby.style.display="flex"; setCap("camera",false); };
+cam.src="/video";
+
+function setCap(name, on){
+  const el=document.querySelector(`.cap[data-cap="${name}"]`);
+  if(el) el.classList.toggle("on", !!on);
+}
+function line(html,cls){
+  if(traceFresh){ trace.innerHTML=""; traceFresh=false; }
+  const d=document.createElement("div"); d.className="line"+(cls?" "+cls:"");
+  d.innerHTML=html; trace.appendChild(d); trace.scrollTop=trace.scrollHeight; return d;
+}
+function chips(el,items){
+  el.innerHTML="";
+  (items||[]).slice(0,8).forEach(t=>{const c=document.createElement("span");c.className="chip";c.textContent=t;el.appendChild(c);});
+  if(!(items||[]).length){const c=document.createElement("span");c.className="chip";c.textContent="—";el.appendChild(c);}
+}
+function setPatient(p){
+  $("p-name").textContent=`${p.name} · ${p.age??"?"} · ${p.gender??""}`;
+  $("p-visit").textContent=p.visit||"—";
+  $("p-esi").innerHTML=`<span class="esi-badge glass-sub">ESI ${p.baseline_esi}</span>`;
+  $("p-vitals").textContent=Object.entries(p.vitals||{}).map(([k,v])=>`${k} ${v}`).join(" · ")||"—";
+  chips($("p-conds"),p.conditions); chips($("p-meds"),p.medications);
+}
+function setBanner(txt,alert){ banner.textContent=txt; banner.className="glass-sub"+(alert?" alert":""); }
+function logItem(html){ logEl.insertAdjacentHTML("afterbegin",`<div class="item">${html}</div>`); }
+
+function handle(ev){
+  const {type,payload:p}=ev;
+  if(type==="patient") setPatient(p);
+  else if(type==="status"){
+    if(p.capabilities){ ["reasoning","nurse_call","patient_checkin"].forEach(k=>setCap(k,p.capabilities[k])); }
+    if(p.level==="error"){ setBanner("Configuration needed",true); logItem(`<b>config</b> ${p.message||""}`); }
+  }
+  else if(type==="perception") line(`· ${p.modality}: ${p.kind} <span class="faint">(${p.confidence})</span>`,"faint");
+  else if(type==="fused"){ traceFresh=true; deltaLine=null;
+    line(`⚑ ${p.summary} — ${p.severity.toUpperCase()} <span class="faint">[${p.kinds.join(" + ")}] conf ${p.confidence}</span>`,"signal"); }
+  else if(type==="reasoning_start") line(`Re-triaging ${p.patient} — prior ESI ${p.prior_esi}…`,"sys");
+  else if(type==="reasoning_delta"){ if(!deltaLine) deltaLine=line("","reason"); deltaLine.textContent+=p.text; trace.scrollTop=trace.scrollHeight; }
+  else if(type==="decision"){
+    const changed=p.new_esi<p.prior_esi;
+    line(`<div class="decision glass-sub ${p.escalate?"esc":""}"><span class="esi">ESI ${p.prior_esi} <span class="arrow">→</span> <b>${p.new_esi}</b></span>`+
+      `&nbsp;&nbsp;<span class="sys">${p.action.replace(/_/g," ")}</span>`+(p.escalate?`<span class="tag">ESCALATING</span>`:``)+
+      `<div class="spoken">“${p.spoken_summary}”</div></div>`);
+    if(changed||p.escalate) setBanner(`ESI ${p.new_esi} · ${p.action.replace(/_/g," ").toUpperCase()}`,true);
+  }
+  else if(type==="call_status"){
+    const s=p.status;
+    if(s==="dialing") setBanner("Dialing charge nurse…",true);
+    else if(s==="ringing") setBanner("Nurse phone ringing",true);
+    else if(s==="failed") setBanner("Call failed",true);
+    else if(s==="patient_checkin") setBanner("Voice check-in",true);
+    logItem(`<b>call</b> ${s} <span class="faint">${p.message||p.conversation_id||p.error||""}</span>`);
+  }
+  else if(type==="escalation") logItem(`<b>${p.kind.replace(/_/g," ")}</b> → ${p.status} <span class="faint">${p.message||""}</span>`);
+  else if(type==="note"){ noteEl.textContent=p.text; $("bundle").textContent="FHIR ✓ "+(p.bundle_path||"").split("/").pop(); }
+}
+
+const ws=new WebSocket(`ws://${location.host}/events`);
+ws.onopen=()=>{conn.className="conn glass-sub live"; connText.textContent="Live";};
+ws.onmessage=e=>handle(JSON.parse(e.data));
+ws.onclose=()=>{conn.className="conn glass-sub down"; connText.textContent="Disconnected";};
+ws.onerror=()=>{conn.className="conn glass-sub down"; connText.textContent="Offline";};
+</script>
+</body>
+</html>
