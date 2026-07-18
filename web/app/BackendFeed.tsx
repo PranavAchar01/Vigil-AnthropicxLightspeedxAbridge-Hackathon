@@ -13,14 +13,14 @@ type Row = {
 };
 
 const TYPE_LABEL: Record<string, string> = {
-  perception: "sensor",
-  fused: "event",
-  decision: "re-triage",
-  call_status: "call",
-  escalation: "escalation",
-  note: "note",
-  tool_call: "agent",
-  conversation_turn: "conversation",
+  perception: "Sensor",
+  fused: "Observation",
+  decision: "Triage",
+  call_status: "Call",
+  escalation: "Escalation",
+  note: "Note",
+  tool_call: "Agent",
+  conversation_turn: "Conversation",
 };
 
 function tone(type: string): string {
@@ -28,6 +28,21 @@ function tone(type: string): string {
   if (type === "fused" || type === "perception") return "signal";
   if (type === "tool_call" || type === "conversation_turn") return "agent";
   return "";
+}
+
+function cleanText(value: string | null | undefined): string {
+  return (value ?? "")
+    .replace(/[\u2013\u2014]/g, " / ")
+    .replace(/[\u2700-\u27BF]/g, "")
+    .replace(/[\u{1F300}-\u{1FAFF}]/gu, "")
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
+function statusLabel(status: "off" | "connecting" | "live"): string {
+  if (status === "live") return "Live";
+  if (status === "connecting") return "Connecting";
+  return "Not configured";
 }
 
 export default function BackendFeed() {
@@ -38,47 +53,73 @@ export default function BackendFeed() {
     const sb = supabase;
     if (!sb) return;
     let active = true;
+
     sb.from("vigil_events")
       .select("*")
       .order("created_at", { ascending: false })
       .limit(40)
-      .then(({ data }) => { if (active && data) setRows(data as Row[]); });
+      .then(({ data }) => {
+        if (active && data) setRows(data as Row[]);
+      });
 
-    const ch = sb
+    const channel = sb
       .channel("vigil_events_feed")
-      .on("postgres_changes", { event: "INSERT", schema: "public", table: "vigil_events" }, (p) => {
-        setRows((prev) => [p.new as Row, ...prev].slice(0, 150));
+      .on("postgres_changes", { event: "INSERT", schema: "public", table: "vigil_events" }, (payload) => {
+        setRows((previous) => [payload.new as Row, ...previous].slice(0, 150));
       })
-      .subscribe((s) => { if (s === "SUBSCRIBED") setStatus("live"); });
+      .subscribe((subscriptionStatus) => {
+        if (subscriptionStatus === "SUBSCRIBED") setStatus("live");
+      });
 
-    return () => { active = false; sb.removeChannel(ch); };
+    return () => {
+      active = false;
+      sb.removeChannel(channel);
+    };
   }, []);
 
   return (
-    <section className="panel glass feed">
-      <div className="phead">
-        <span className={`fdot ${status}`} />
-        <span className="ptitle">Backend · live event stream</span>
-        <span className="pill">Supabase {status === "live" ? "· live" : status === "off" ? "· not configured" : "· connecting"}</span>
-      </div>
-      <div className="feedbody">
-        {rows.length === 0 ? (
-          <div className="feedrow sysc">
-            {status === "off"
-              ? "Set NEXT_PUBLIC_SUPABASE_URL + key to stream the backend."
-              : "Waiting for events — every sensor input, agent query, decision, and conversation turn lands here."}
+    <section className="event-dock surface" aria-label="System events">
+      <div className="event-heading">
+        <div className="event-title">
+          <span className="section-index">04</span>
+          <div>
+            <h2>System events</h2>
+            <p>Sensor and agent activity</p>
           </div>
-        ) : (
-          rows.map((r) => (
-            <div key={r.id} className={`feedrow ${tone(r.type)}`}>
-              <span className="ftime">{new Date(r.created_at).toLocaleTimeString([], { hour12: false })}</span>
-              <span className="fbadge">{TYPE_LABEL[r.type] ?? r.type}</span>
-              <span className="fsrc">{r.source ?? ""}</span>
-              <span className="fsum">{r.summary ?? r.type}</span>
-              {r.patient ? <span className="fpat">{r.patient}</span> : null}
+        </div>
+        <span className={`event-status ${status}`}>
+          <i aria-hidden="true" />
+          {statusLabel(status)}
+        </span>
+      </div>
+
+      <div className="event-table" role="table" aria-label="Recent Vigil events">
+        <div className="event-row event-labels" role="row">
+          <span>Time</span>
+          <span>Type</span>
+          <span>Source</span>
+          <span>Event</span>
+          <span>Patient</span>
+        </div>
+
+        <div className="event-rows">
+          {rows.length === 0 ? (
+            <div className="event-empty">
+              <span className="empty-line" aria-hidden="true" />
+              <p>Event stream ready. New sensor and agent activity will appear here.</p>
             </div>
-          ))
-        )}
+          ) : (
+            rows.map((row) => (
+              <div key={row.id} className={`event-row ${tone(row.type)}`} role="row">
+                <time>{new Date(row.created_at).toLocaleTimeString([], { hour12: false })}</time>
+                <span className="event-type">{cleanText(TYPE_LABEL[row.type] ?? row.type)}</span>
+                <span className="event-source">{cleanText(row.source) || "System"}</span>
+                <span className="event-summary">{cleanText(row.summary) || cleanText(row.type)}</span>
+                <span className="event-patient">{cleanText(row.patient) || "None"}</span>
+              </div>
+            ))
+          )}
+        </div>
       </div>
     </section>
   );
