@@ -1,8 +1,10 @@
 import type { Metadata } from "next";
 import "./globals.css";
 
+const siteUrl = process.env.NEXT_PUBLIC_SITE_URL || "https://web-pink-chi-71.vercel.app";
+
 export const metadata: Metadata = {
-  metadataBase: new URL("https://web-pink-chi-71.vercel.app"),
+  metadataBase: new URL(siteUrl),
   title: "Vigil | Command Center",
   description: "Live patient monitoring, clinical reasoning, and escalation in one command center.",
   openGraph: {
