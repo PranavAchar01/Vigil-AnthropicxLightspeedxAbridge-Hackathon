@@ -70,7 +70,7 @@ class EventFuser:
     _HARD_ORDER: tuple[PerceptionKind, ...] = ("fainted", "seizure")
     _SOFT_ORDER: tuple[PerceptionKind, ...] = ("slump",)
     _HARD_LABEL = {
-        "fainted": "Patient fainted — down 5s and not recovering",
+        "fainted": "Patient fainted — down 3s and not recovering",
         "seizure": "Seizure — sustained convulsive movement",
     }
     _SOFT_LABEL = {

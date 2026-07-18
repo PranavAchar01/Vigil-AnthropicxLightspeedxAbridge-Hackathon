@@ -64,6 +64,14 @@ class Params:
     torso_horiz_deg: float = _f("VIGIL_TORSO_HORIZ_DEG", 55.0)
     ar_wide: float = _f("VIGIL_AR_WIDE", 1.05)  # bbox wider than tall
     low_cy: float = _f("VIGIL_LOW_CY", 0.60)  # body-center in the lower part of frame
+    # GROUND-HIT gate: 'fainted' validation only STARTS on a real plunge — the body
+    # center falling this fraction of frame height (within drop_window_s) at this
+    # downward speed. Measured on real footage: an actual fall shows drop 0.13-0.30
+    # with vy +0.4..+1.1; normal standing/sway never exceeds drop 0.03.
+    ground_drop_frac: float = _f("VIGIL_GROUND_DROP_FRAC", 0.15)
+    ground_vy: float = _f("VIGIL_GROUND_VY", 0.30)
+    # Exit 'down' after sustained POSITIVE upright evidence — even if motionless.
+    down_exit_grace_s: float = _f("VIGIL_DOWN_EXIT_GRACE_S", 0.5)
     # motion / stillness (shoulder-widths per second)
     still_motion: float = _f("VIGIL_STILL_MOTION", 0.55)
     motionless_s: float = _f("VIGIL_MOTIONLESS_S", 3.0)  # soft — shows quickly
@@ -84,6 +92,18 @@ class Params:
     seizure_tremor_lo: float = _f("VIGIL_SEIZURE_TREMOR_LO", 0.025)
     seizure_tremor_hi: float = _f("VIGIL_SEIZURE_TREMOR_HI", 0.16)
     seizure_tremor_s: float = _f("VIGIL_SEIZURE_TREMOR_S", 1.3)
+    # spectral seizure: signed optical-flow of the person MINUS the background
+    # (camera shake cancels), FFT over a sliding window. A convulsion shows a
+    # dominant 2.5-9 Hz peak (concentration ~1.0 on real footage); normal standing
+    # or a fall never sustains one. Fires on amp+concentration sustained osc_s.
+    osc_band_lo: float = _f("VIGIL_SEIZURE_OSC_BAND_LO", 2.5)  # Hz
+    osc_band_hi: float = _f("VIGIL_SEIZURE_OSC_BAND_HI", 9.0)  # Hz
+    osc_win_s: float = _f("VIGIL_SEIZURE_OSC_WIN_S", 1.28)  # FFT window
+    # 0.05: fires on both real seizure clips at every pipeline rate 10-30 fps while
+    # standing-still noise never sustains past ~0.6s (vs the 1.2s requirement).
+    osc_amp: float = _f("VIGIL_SEIZURE_OSC_AMP", 0.05)  # peak amplitude (small-px/frame)
+    osc_conc: float = _f("VIGIL_SEIZURE_OSC_CONC", 0.70)  # band peak / global peak
+    osc_sustain_s: float = _f("VIGIL_SEIZURE_OSC_S", 1.2)  # sustained before firing
     # bookkeeping
     cooldown_s: float = _f("VIGIL_COOLDOWN_S", 6.0)
     unresponsive_cooldown_s: float = _f("VIGIL_UNRESPONSIVE_COOLDOWN_S", 15.0)
@@ -131,6 +151,8 @@ class PersonState:
     seizure_last: float = 0.0  # last frame the shaking was above threshold (hysteresis)
     slump_since: float = 0.0
     tremor_since: float = 0.0
+    osc_since: float = 0.0  # spectral-oscillation seizure accumulator
+    upright_since: float = 0.0  # first frame of continuous upright evidence while down
     last_drop_ts: float = -1e9
     last_emit: dict = field(default_factory=dict)
 
@@ -158,8 +180,29 @@ class VisionDetector:
         self._prev_gray: np.ndarray | None = None  # frame-diff seizure/tremor state
         self._tremor_ema: float = 0.0
         self._prev_box_center: tuple[float, float] | None = None
+        self._prev_small: np.ndarray | None = None  # downscaled gray for flow oscillation
+        # (ts, net_x, net_y) person-vs-bg flow. Sized to span the full osc window even
+        # on high-fps sources (256 covers 1.28s at 200 fps); a too-small buffer would
+        # silently fail the window-span guard on EVERY frame above ~61 fps.
+        self._flow_hist: deque = deque(maxlen=256)
 
     # ------------------------------------------------------------------ helpers
+    def reset_stream(self) -> None:
+        """Fresh signal history for a video-source discontinuity (e.g. a demo clip
+        looping back to frame 0) so the seam never reads as a fall/drop. Event
+        cooldowns survive — a re-run of the same clip must not re-page instantly."""
+        if self.st.fall_pending:  # never strand the dashboard's validation banner
+            self._provisional(self.st.t_prev, "fall_cleared", 0.0)
+        last_emit, last_drop = self.st.last_emit, self.st.last_drop_ts
+        self.st = PersonState()
+        self.st.last_emit = last_emit
+        self.st.last_drop_ts = last_drop
+        self._prev_gray = None
+        self._prev_small = None
+        self._prev_box_center = None
+        self._flow_hist.clear()
+        self._tremor_ema = 0.0
+
     def status_line(self) -> str:
         m = self.metrics
         return f"{self.st.fsm}  motion:{m.get('motion', 0):.1f}  drop:{m.get('drop', 0):.2f}"
@@ -227,11 +270,87 @@ class VisionDetector:
             self._prev_gray = None
             self._prev_box_center = None
             self.st.tremor_since = 0.0
+            self._prev_small = None
+            self._flow_hist.clear()
+            self.st.osc_since = 0.0
             return res
         box, kp, kc = person
         self.analyze(box, kp, kc, H, ts)
         self._tremor(frame, box, ts)
+        self._flow_osc(frame, box, ts)
         return res
+
+    def _flow_osc(self, frame, box, ts: float) -> None:
+        """Signed person-vs-background optical flow (camera shake cancels), feeding
+        the spectral seizure detector. Pixel work only — decision in _osc_step."""
+        import cv2  # runtime path only (process() already requires the YOLO stack)
+
+        small_w = 270
+        scale = small_w / frame.shape[1]
+        g = cv2.cvtColor(
+            cv2.resize(frame, (small_w, int(frame.shape[0] * scale))), cv2.COLOR_BGR2GRAY
+        )
+        prev, self._prev_small = self._prev_small, g
+        if prev is None or prev.shape != g.shape:
+            return
+        flow = cv2.calcOpticalFlowFarneback(prev, g, None, 0.5, 3, 15, 3, 5, 1.2, 0)
+        x1, y1 = max(int(box[0] * scale), 0), max(int(box[1] * scale), 0)
+        x2, y2 = min(int(box[2] * scale), g.shape[1]), min(int(box[3] * scale), g.shape[0])
+        if x2 - x1 < 4 or y2 - y1 < 4:
+            return
+        mask = np.zeros(g.shape, bool)
+        mask[y1:y2, x1:x2] = True
+        net_x = float(flow[..., 0][mask].mean())
+        net_y = float(flow[..., 1][mask].mean())
+        if (~mask).any():  # subtract global (camera) motion
+            net_x -= float(flow[..., 0][~mask].mean())
+            net_y -= float(flow[..., 1][~mask].mean())
+        self._osc_step(ts, net_x, net_y)
+
+    def _osc_step(self, ts: float, net_x: float, net_y: float) -> None:
+        """Spectral seizure decision on the net-flow series: a convulsion shows a
+        DOMINANT 2.5-9 Hz oscillation of the person against the background,
+        sustained. Camera shake and normal movement never concentrate there.
+        Pure (no pixels) so offline replays drive the identical code path."""
+        p = self.p
+        self._flow_hist.append((ts, net_x, net_y))
+        win = [r for r in self._flow_hist if ts - r[0] <= p.osc_win_s]
+        # Frame-rate independent: the live loop may run at 8-15 fps (YOLO + flow per
+        # frame), so require only enough samples to span the window, and resample
+        # onto a uniform grid before the FFT (correct under jittery timestamps).
+        # A tremor undersampled below Nyquist aliases DOWN in frequency but stays an
+        # oscillation, while a still person shows none at any rate — so detection
+        # keeps working at low fps.
+        if len(win) < 8 or win[-1][0] - win[0][0] < 0.8 * p.osc_win_s:
+            return
+        t_arr = np.array([r[0] for r in win])
+        n_u = 32  # uniform grid: fs 25 Hz over the window -> band fully representable
+        t_u = np.linspace(t_arr[0], t_arr[-1], n_u)
+        fs = (n_u - 1) / max(t_arr[-1] - t_arr[0], 1e-3)
+        passing = False
+        for raw in (np.array([r[2] for r in win]), np.array([r[1] for r in win])):  # y first
+            sig = np.interp(t_u, t_arr, raw)
+            seg = sig - sig.mean()
+            mag = np.abs(np.fft.rfft(seg * np.hanning(len(seg))))
+            freqs = np.fft.rfftfreq(len(seg), 1.0 / fs)
+            band = (freqs >= p.osc_band_lo) & (freqs <= p.osc_band_hi)
+            nz = freqs > 0.5  # exclude DC/slow drift from the concentration baseline
+            if not band.any() or not nz.any():
+                continue
+            amp = float(mag[band].max()) / (len(seg) / 2)
+            conc = float(mag[band].max() / (mag[nz].max() + 1e-9))
+            self.metrics["osc_amp"], self.metrics["osc_conc"] = round(amp, 3), round(conc, 2)
+            if amp >= p.osc_amp and conc >= p.osc_conc:
+                passing = True
+                break
+        grounded = self.st.fsm == "down"
+        recent_fall = ts - self.st.last_drop_ts < 6.0  # fall impact must not read as seizure
+        if passing and not grounded and not recent_fall:
+            self.st.osc_since = self.st.osc_since or ts
+            if ts - self.st.osc_since >= p.osc_sustain_s:
+                self._fire(ts, "seizure", 0.85, "SEIZURE DETECTED")
+        else:
+            self.st.osc_since = 0.0
 
     def _tremor(self, frame, box, ts: float) -> None:
         """Frame-difference seizure/tremor detector: fires 'seizure' on SUSTAINED
@@ -254,16 +373,23 @@ class VisionDetector:
             return
         d = np.abs(g[y1:y2, x1:x2] - prev[y1:y2, x1:x2])
         energy = float((d > 12).mean())
+        cx, cy = (x1 + x2) / 2.0, (y1 + y2) / 2.0
+        self._tremor_step(energy, (cx, cy), float(g.shape[0]), ts)
+
+    def _tremor_step(self, energy: float, center, frame_h: float, ts: float) -> None:
+        """Pure tremor decision on a precomputed box-diff energy — split from the
+        pixel work so offline replays drive the identical code path."""
+        p = self.p
         self._tremor_ema = 0.6 * self._tremor_ema + 0.4 * energy
         e = self._tremor_ema
         self.metrics["tremor"] = round(e, 3)
 
         # a seizure tremor is IN PLACE; a fall/large move TRANSLATES the box → not a
         # tremor. Reset when the person is moving across the frame so falls stay falls.
-        cx, cy = (x1 + x2) / 2.0, (y1 + y2) / 2.0
+        cx, cy = center
         prevc, self._prev_box_center = self._prev_box_center, (cx, cy)
         translating = (
-            prevc is not None and (abs(cx - prevc[0]) + abs(cy - prevc[1])) / g.shape[0] > 0.015
+            prevc is not None and (abs(cx - prevc[0]) + abs(cy - prevc[1])) / frame_h > 0.015
         )
         grounded = self.st.fsm == "down"  # on the floor => a fall/collapse, not a seizure
         recent_fall = ts - self.st.last_drop_ts < 6.0  # a fall just happened -> not a seizure
@@ -364,43 +490,56 @@ class VisionDetector:
         if upright_now and motion >= self.p.still_motion:
             self.st.fsm = "upright"
 
-        horiz = (
-            (torso_deg is not None and torso_deg >= self.p.torso_horiz_deg)
-            or ar >= self.p.ar_wide
-            or head_below
-        )
         low = cy >= self.p.low_cy
 
         # ============================ SCENARIO DETECTORS ========================
-        # 1) FAINTED — the person goes DOWN (falls to the floor / lies horizontal /
-        # collapses) and STAYS down. VALIDATION: they must remain down for at least
-        # faint_s (5s) before we fire, so a trip-and-recover never pages the nurse.
-        # This replaces the old separate 'fall', 'collapse', and 'unresponsive' events
-        # — there is no standalone "fall detection".
+        # 1) FAINTED — ONLY a person who actually HITS THE GROUND (or is lying) can
+        # start the validation. Entry requires a real plunge (ground_drop_frac of
+        # frame height at ground_vy downward speed) or unambiguous lying evidence
+        # (horizontal torso / wide box low in frame). Standing still, sagging,
+        # head-drops, or slow posture drift can NEVER enter — that was the source of
+        # standing-still false positives. Once down, the state releases only on
+        # sustained POSITIVE upright evidence (down_exit_grace_s) — which works even
+        # for a person who stands up and then holds perfectly still.
         truly_horizontal = torso_deg is not None and torso_deg >= self.p.torso_horiz_deg
-        big_drop = drop >= 2.4 * self.p.drop_frac and vy > 0.4  # fell straight down
-        if big_drop:
+        ground_hit = drop >= self.p.ground_drop_frac and vy >= self.p.ground_vy
+        lying = truly_horizontal or (ar >= self.p.ar_wide and low)
+        if ground_hit or lying:
             self.st.fsm = "down"
-        went_down = (
-            (drop >= self.p.drop_frac and (horiz or low))  # a fall to the ground
-            or truly_horizontal                             # lying / horizontal torso
-            or self.st.fsm == "down"                        # already registered as down
-        )
-        if went_down:
-            self.st.fsm = "down"
+            self.st.upright_since = 0.0
+
+        if self.st.fsm == "down":
+            # release only on sustained POSITIVE upright evidence: head above the
+            # shoulders, torso vertical (or hips unseen), body neither low in frame
+            # nor wide. Works even for a person who stands up and then holds still.
+            looks_upright = (
+                not head_below
+                and (torso_deg is None or torso_deg < 25.0)
+                and not low
+                and ar < self.p.ar_wide
+            )
+            if looks_upright:
+                self.st.upright_since = self.st.upright_since or ts
+                if ts - self.st.upright_since >= self.p.down_exit_grace_s:
+                    self.st.fsm = "upright"
+            else:
+                self.st.upright_since = 0.0
+
+        if self.st.fsm == "down":
             if not self.st.faint_since:  # FIRST frame down → flag it on the UI instantly
                 self.st.faint_since = ts
                 self.st.fall_pending = True
                 self.flash = ("FALL DETECTED — validating", ts)
                 self._provisional(ts, "fall_detected", self.p.faint_s)
-            if ts - self.st.faint_since >= self.p.faint_s:  # ON THE GROUND >= 5s → confirm
+            if ts - self.st.faint_since >= self.p.faint_s:  # on the ground long enough
                 self.st.fall_pending = False
-                self._fire(ts, "fainted", 0.9, "FAINTED — down 5s, not recovering")
+                self._fire(ts, "fainted", 0.9, f"FAINTED — down {self.p.faint_s:g}s, not recovering")
         else:
-            if self.st.fall_pending:  # got back up before the 5s validation → clear it
+            if self.st.fall_pending:  # got back up before validation completed → clear it
                 self.st.fall_pending = False
                 self._provisional(ts, "fall_cleared", 0.0)
             self.st.faint_since = 0.0
+        went_down = self.st.fsm == "down"  # the seizure gate reads this
 
         # 2) SEIZURE — oscillatory shaking sustained >= seizure_s (5s) before firing.
         # Brief dips in the signal are NORMAL in a real convulsion, so we don't reset
@@ -684,16 +823,51 @@ def run_vision(
         print(f"[vision] could not open source={source}; vision disabled")
         return
     is_file = not isinstance(source, int)
+    # File sources play in REAL TIME (skip frames if inference lags, sleep if ahead)
+    # so fall velocity reads exactly as recorded. When the clip ends, HOLD the final
+    # frame for hold_last_s before looping: a demo clip that ends with the person on
+    # the ground keeps them "down" through the freeze so the faint_s validation can
+    # complete (looping straight back to the standing first frame would clear it).
+    hold_last_s = _f("VIGIL_VIDEO_HOLD_LAST_S", 4.0)
+    src_fps = (cap.get(cv2.CAP_PROP_FPS) or 30.0) if is_file else 30.0
+    last_frame = None
+    hold_until = 0.0
+    file_start = time.time()
+    frame_idx = 0
     print(f"[vision] {'reading ' + str(source) if is_file else 'camera open'}; detecting distress")
     try:
         while not stop_event.is_set() and cap.isOpened():
             ok, frame = cap.read()
+            if ok and is_file:
+                frame_idx += 1
+                last_frame = frame
+                # lock media time to wall time: drop frames when behind, sleep when ahead
+                target_idx = int((time.time() - file_start) * src_fps)
+                while frame_idx < target_idx and cap.grab():
+                    frame_idx += 1
+                ahead = frame_idx / src_fps - (time.time() - file_start)
+                if ahead > 0:
+                    time.sleep(min(ahead, 0.25))
             if not ok:
-                if is_file:  # loop the demo clip so the app keeps showing it
-                    cap.set(cv2.CAP_PROP_POS_FRAMES, 0)
+                if is_file:
+                    if last_frame is not None and hold_last_s > 0:
+                        if not hold_until:
+                            hold_until = time.time() + hold_last_s
+                        if time.time() < hold_until:
+                            frame = last_frame.copy()  # freeze the final frame
+                            ok = True
+                            time.sleep(1.0 / src_fps)
+                    if not ok:  # hold elapsed (or disabled) → loop the clip
+                        cap.set(cv2.CAP_PROP_POS_FRAMES, 0)
+                        hold_until = 0.0
+                        file_start = time.time()
+                        frame_idx = 0
+                        det.reset_stream()  # the seam must never read as a fall
+                        time.sleep(0.02)  # a zero-frame file must not busy-spin
+                        continue
+                else:
+                    time.sleep(0.05)
                     continue
-                time.sleep(0.05)
-                continue
 
             # DEMO PAUSE — keep streaming live video but run no detection (no events).
             if pause_event is not None and pause_event.is_set():
