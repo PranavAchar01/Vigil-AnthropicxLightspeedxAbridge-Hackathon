@@ -1,0 +1,38 @@
+[
+  {
+    "patient_id": "demo-cardiac",
+    "name": "Jordan Ellis",
+    "age": 58,
+    "gender": "male",
+    "conditions": ["Coronary artery disease", "Hypertension", "Prior myocardial infarction"],
+    "medications": ["apixaban 5 MG", "metoprolol 50 MG", "atorvastatin 40 MG"],
+    "vitals": {"heart_rate": "88/min", "systolic_bp": "148 mmHg", "spo2": "97%"}
+  },
+  {
+    "patient_id": "demo-diabetic",
+    "name": "Priya Nair",
+    "age": 24,
+    "gender": "female",
+    "conditions": ["Type 1 diabetes mellitus", "Hypoglycemia unawareness"],
+    "medications": ["insulin glargine", "insulin lispro"],
+    "vitals": {"heart_rate": "102/min", "glucose": "58 mg/dL", "spo2": "99%"}
+  },
+  {
+    "patient_id": "demo-copd",
+    "name": "Walter Osei",
+    "age": 71,
+    "gender": "male",
+    "conditions": ["COPD", "Congestive heart failure"],
+    "medications": ["tiotropium", "furosemide 40 MG", "albuterol inhaler"],
+    "vitals": {"heart_rate": "96/min", "resp_rate": "22/min", "spo2": "90%"}
+  },
+  {
+    "patient_id": "demo-healthy",
+    "name": "Sam Rivera",
+    "age": 29,
+    "gender": "female",
+    "conditions": [],
+    "medications": [],
+    "vitals": {"heart_rate": "72/min", "systolic_bp": "118 mmHg", "spo2": "99%"}
+  }
+]
