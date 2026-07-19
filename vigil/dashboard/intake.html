@@ -3,174 +3,146 @@
 <head>
 <meta charset="utf-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1" />
-<title>Vigil · Voice Intake</title>
+<title>Vigil · Record Intake</title>
 <style>
   :root{
-    --bg:#0b0f14; --panel:#121924; --panel2:#0e141d; --line:rgba(255,255,255,.08);
-    --t1:#eaf0f7; --t2:#9fb0c3; --accent:#5b9dff; --rec:#e2534d;
-    --e1:#e2534d; --e2:#ef8f4c; --e3:#e7c14b; --e4:#57c281; --e5:#5aa9d6;
+    --bg:#050506; --surface:rgba(15,15,18,0.9); --inset:rgba(255,255,255,0.03);
+    --border:rgba(255,255,255,0.12); --text:#f7f7f8; --soft:#b0b0b9; --faint:#767681;
+    --accent:#6c8cff; --accent-bright:#a2b4ff; --amber:#f0b85a; --danger:#ff7272;
+    --font:Inter,ui-sans-serif,-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;
+    --mono:"SFMono-Regular","Cascadia Code",Consolas,monospace;
   }
-  *{box-sizing:border-box}
-  body{margin:0;background:radial-gradient(1200px 700px at 50% -10%,#16202e,var(--bg));
-    color:var(--t1);font:15px/1.5 -apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif;
-    min-height:100vh;display:flex;flex-direction:column;align-items:center;padding:32px 18px 60px}
-  h1{font-size:19px;font-weight:650;letter-spacing:.2px;margin:0 0 2px}
-  .sub{color:var(--t2);font-size:13px;margin-bottom:26px}
-  .wrap{width:100%;max-width:560px}
-  .card{background:linear-gradient(180deg,var(--panel),var(--panel2));border:1px solid var(--line);
-    border-radius:16px;padding:20px;margin-bottom:16px}
-  .row{display:flex;gap:10px;align-items:center;flex-wrap:wrap}
-  label{color:var(--t2);font-size:12px;text-transform:uppercase;letter-spacing:.6px}
-  select,input[type=text]{background:#0a0f16;border:1px solid var(--line);color:var(--t1);
-    border-radius:10px;padding:10px 12px;font-size:14px;width:100%}
-  .mic{width:112px;height:112px;border-radius:50%;border:none;cursor:pointer;margin:6px auto 4px;
-    display:flex;align-items:center;justify-content:center;font-size:40px;color:#fff;
-    background:radial-gradient(circle at 50% 35%,#2b3a52,#182234);border:1px solid var(--line);
-    transition:transform .1s,box-shadow .2s}
-  .mic:hover{transform:translateY(-1px)}
-  .mic.recording{background:radial-gradient(circle at 50% 35%,#ff6a63,#c23a35);
-    box-shadow:0 0 0 0 rgba(226,83,77,.5);animation:pulse 1.4s infinite}
-  @keyframes pulse{0%{box-shadow:0 0 0 0 rgba(226,83,77,.45)}70%{box-shadow:0 0 0 22px rgba(226,83,77,0)}100%{box-shadow:0 0 0 0 rgba(226,83,77,0)}}
-  .hint{text-align:center;color:var(--t2);font-size:13px;min-height:20px}
-  .btn{background:#1b283a;border:1px solid var(--line);color:var(--t1);border-radius:10px;
-    padding:10px 14px;font-size:14px;cursor:pointer}
-  .btn:hover{background:#22344b}
-  .btn.primary{background:var(--accent);border-color:transparent;color:#04121f;font-weight:600}
-  .divider{display:flex;align-items:center;gap:10px;color:var(--t2);font-size:12px;margin:14px 0}
-  .divider::before,.divider::after{content:"";height:1px;background:var(--line);flex:1}
-  .result{display:none}
-  .esi{display:flex;align-items:center;gap:16px}
-  .esi .num{font-size:54px;font-weight:800;line-height:1;width:78px;height:78px;border-radius:16px;
-    display:flex;align-items:center;justify-content:center;color:#06101a}
-  .chip{display:inline-block;padding:3px 9px;border-radius:999px;font-size:12px;
-    background:rgba(91,157,255,.14);color:#bcd6ff;border:1px solid rgba(91,157,255,.3)}
-  .kv{margin-top:14px;display:grid;grid-template-columns:120px 1fr;gap:6px 14px;font-size:14px}
-  .kv .k{color:var(--t2);font-size:12px;text-transform:uppercase;letter-spacing:.5px;padding-top:2px}
-  .tags span{display:inline-block;background:#0a121c;border:1px solid var(--line);border-radius:8px;
-    padding:3px 8px;margin:0 6px 6px 0;font-size:12.5px;color:#cdd9e6}
-  .spoken{margin-top:14px;padding:12px 14px;background:#0a121c;border-left:3px solid var(--accent);
-    border-radius:8px;color:#dfe8f2;font-style:italic}
-  .transcript{margin-top:10px;color:var(--t2);font-size:13px}
-  .warn{margin-top:12px;color:#e7c14b;font-size:12.5px}
-  .err{color:var(--rec);font-size:13px;margin-top:8px}
-  .spinner{display:none;text-align:center;color:var(--t2);padding:8px}
+  *{box-sizing:border-box;border-radius:0}
+  body{margin:0;min-height:100vh;background:var(--bg);color:var(--text);font-family:var(--font);
+    -webkit-font-smoothing:antialiased;display:flex;flex-direction:column;align-items:center;
+    padding:40px 18px 60px}
+  .wrap{width:100%;max-width:540px}
+  .head{display:flex;align-items:baseline;justify-content:space-between;margin-bottom:4px}
+  h1{font-size:17px;font-weight:650;letter-spacing:.02em;margin:0}
+  .badge{font:600 9px var(--mono);letter-spacing:.14em;text-transform:uppercase;color:var(--faint);
+    border:1px solid var(--border);padding:4px 8px}
+  .sub{color:var(--faint);font-size:12.5px;margin:0 0 24px}
+  .panel{border:1px solid var(--border);background:var(--surface);padding:18px}
+  .label{font:600 8px var(--mono);letter-spacing:.14em;text-transform:uppercase;color:var(--faint)}
+  select,input[type=text]{width:100%;background:#0a0f16;border:1px solid var(--border);color:var(--text);
+    padding:10px 11px;font-family:var(--font);font-size:13px;outline:none}
+  select:focus,input:focus{border-color:var(--accent)}
+  .field{margin-bottom:14px}
+  .controls{display:flex;gap:9px;align-items:stretch;flex-wrap:wrap}
+  .mic{display:inline-flex;align-items:center;gap:10px;padding:11px 16px;font-size:13px;font-weight:560;
+    color:var(--text);background:rgba(255,255,255,0.03);border:1px solid var(--border);cursor:pointer}
+  .mic:hover:not(:disabled){background:rgba(255,255,255,0.06)}
+  .mic:disabled{opacity:.55;cursor:default}
+  .mic .dot{width:10px;height:10px;background:var(--accent-bright)}
+  .mic.rec{border-color:rgba(255,114,114,.5);color:var(--danger);background:rgba(255,114,114,.1)}
+  .mic.rec .dot{background:var(--danger);animation:blink 1s steps(2) infinite}
+  @keyframes blink{50%{opacity:.25}}
+  .textrow{display:flex;flex:1;min-width:200px;gap:8px;margin-top:12px}
+  .textrow button{padding:0 14px;font-family:var(--font);font-size:13px;font-weight:560;color:var(--accent-bright);
+    background:rgba(255,255,255,0.03);border:1px solid var(--border);cursor:pointer}
+  .textrow button:hover:not(:disabled){border-color:var(--accent)}
+  .err{color:var(--danger);font-size:12.5px;margin-top:10px}
+  .spin{color:var(--faint);font-size:12.5px;margin-top:12px;display:none}
+  .result{margin-top:16px;border-top:1px solid var(--border);padding-top:16px;display:none}
+  .esi{display:flex;align-items:center;gap:14px}
+  .esi .n{width:48px;height:48px;display:flex;align-items:center;justify-content:center;font-size:26px;
+    font-weight:800;border:1px solid currentColor}
+  .esi .n.e1{color:var(--danger)} .esi .n.e2{color:#f0955a} .esi .n.e3{color:var(--amber)}
+  .esi .n.e4{color:#63c98b} .esi .n.e5{color:var(--accent-bright)}
+  .esi small{display:block;color:var(--soft);font-size:12.5px;margin-top:3px}
+  .crit{font-size:12.5px;line-height:1.5;color:var(--soft);margin:12px 0 0}
+  .chips{display:flex;flex-wrap:wrap;gap:6px;margin-top:10px}
+  .chip{border:1px solid var(--border);color:var(--soft);padding:4px 8px;font-size:12px}
+  .heard{margin:12px 0 0;font-size:12px;font-style:italic;color:var(--faint)}
+  .confirm{margin:10px 0 0;font-size:10.5px;color:var(--amber);letter-spacing:.02em}
+  ::-webkit-scrollbar{width:8px}::-webkit-scrollbar-thumb{background:rgba(255,255,255,.14)}
 </style>
 </head>
 <body>
   <div class="wrap">
-    <h1>Vigil · Voice Intake</h1>
-    <div class="sub">Speak a patient's reason for visit — Vigil assigns the initial ESI (Emergency Severity Index) with the decision point behind it.</div>
+    <div class="head">
+      <h1>Vigil · Record Intake</h1>
+      <span class="badge" id="conn">Backend</span>
+    </div>
+    <p class="sub">Speak a patient's reason for visit — Vigil transcribes it and assigns the initial ESI (1–5).</p>
 
-    <div class="card">
-      <div class="row" style="margin-bottom:14px">
-        <div style="flex:1">
-          <label for="pt">Ground in chart (optional)</label>
-          <select id="pt"><option value="">No chart — symptoms only</option></select>
-        </div>
+    <div class="panel">
+      <div class="field">
+        <div class="label">Ground in chart (optional)</div>
+        <select id="pt"><option value="">No chart — symptoms only</option></select>
       </div>
-      <button id="mic" class="mic" title="Record">🎙</button>
-      <div id="hint" class="hint">Tap to record · tap again to stop</div>
 
-      <div class="divider">or type it</div>
-      <div class="row">
-        <input id="txt" type="text" placeholder="e.g. crushing chest pain into my left arm, history of heart problems" />
-        <button id="go" class="btn primary">Grade</button>
+      <div class="controls">
+        <button id="mic" class="mic"><span class="dot"></span><span id="miclabel">Record intake</span></button>
+      </div>
+      <div class="textrow">
+        <input id="txt" type="text" placeholder="or type symptoms…" />
+        <button id="go">Grade</button>
       </div>
       <div id="err" class="err"></div>
-    </div>
+      <div id="spin" class="spin">Transcribing &amp; grading…</div>
 
-    <div id="spin" class="spinner">Transcribing &amp; grading…</div>
-
-    <div id="result" class="card result">
-      <div class="esi">
-        <div id="num" class="num">–</div>
-        <div>
-          <div style="font-size:13px;color:var(--t2);text-transform:uppercase;letter-spacing:.6px">Initial ESI</div>
-          <div id="dp" class="chip">–</div>
-        </div>
+      <div id="result" class="result">
+        <div class="esi"><div id="num" class="n">–</div>
+          <div><div class="label">Initial ESI</div><small id="dp">–</small></div></div>
+        <p id="crit" class="crit"></p>
+        <div id="res" class="chips"></div>
+        <p id="heard" class="heard"></p>
+        <p class="confirm">Decision support — a clinician confirms this grade.</p>
       </div>
-      <div class="kv">
-        <div class="k">Complaint</div><div id="cc">–</div>
-        <div class="k">Criterion</div><div id="crit">–</div>
-        <div class="k">Resources</div><div id="res" class="tags">–</div>
-        <div class="k">Red flags</div><div id="rf" class="tags">–</div>
-        <div class="k">Confidence</div><div id="conf">–</div>
-        <div class="k">Rationale</div><div id="rat">–</div>
-      </div>
-      <div id="spoken" class="spoken"></div>
-      <div id="transcript" class="transcript"></div>
-      <div class="warn">⚠ Decision support — a clinician confirms this grade. The system acts autonomously only to escalate, never to withhold care.</div>
     </div>
   </div>
 
 <script>
-const ESI = {1:'var(--e1)',2:'var(--e2)',3:'var(--e3)',4:'var(--e4)',5:'var(--e5)'};
-const $ = id => document.getElementById(id);
-const mic=$('mic'), hint=$('hint'), errEl=$('err'), spin=$('spin');
+const $=id=>document.getElementById(id);
+const mic=$('mic'), miclabel=$('miclabel'), errEl=$('err'), spin=$('spin');
 
-// populate patient dropdown
 fetch('/patients').then(r=>r.json()).then(d=>{
-  (d.patients||[]).forEach(p=>{
-    const o=document.createElement('option'); o.value=p.id;
-    o.textContent=`${p.name} — ${p.visit||''}`.trim(); $('pt').appendChild(o);
-  });
-}).catch(()=>{});
+  (d.patients||[]).forEach(p=>{const o=document.createElement('option');o.value=p.id;o.textContent=p.name;$('pt').appendChild(o);});
+  $('conn').textContent='Backend live';
+}).catch(()=>{ $('conn').textContent='Backend offline'; });
 
 let rec=null, chunks=[];
-mic.onclick = async () => {
+mic.onclick=async()=>{
   errEl.textContent='';
-  if(rec && rec.state==='recording'){ rec.stop(); return; }
+  if(rec&&rec.state==='recording'){rec.stop();return;}
   try{
-    const stream = await navigator.mediaDevices.getUserMedia({audio:true});
-    rec = new MediaRecorder(stream); chunks=[];
-    rec.ondataavailable = e => e.data.size && chunks.push(e.data);
-    rec.onstop = () => {
+    const stream=await navigator.mediaDevices.getUserMedia({audio:true});
+    rec=new MediaRecorder(stream); chunks=[];
+    rec.ondataavailable=e=>e.data.size&&chunks.push(e.data);
+    rec.onstop=()=>{
       stream.getTracks().forEach(t=>t.stop());
-      mic.classList.remove('recording'); mic.textContent='🎙'; hint.textContent='Tap to record · tap again to stop';
-      const blob = new Blob(chunks, {type: rec.mimeType||'audio/webm'});
-      const ext = blob.type.includes('ogg')?'ogg':blob.type.includes('wav')?'wav':'webm';
-      const fd = new FormData(); fd.append('audio', blob, 'intake.'+ext); fd.append('patient_id', $('pt').value);
+      mic.classList.remove('rec'); miclabel.textContent='Record intake';
+      const blob=new Blob(chunks,{type:rec.mimeType||'audio/webm'});
+      const ext=blob.type.includes('ogg')?'ogg':blob.type.includes('wav')?'wav':'webm';
+      const fd=new FormData(); fd.append('audio',blob,'intake.'+ext); fd.append('patient_id',$('pt').value);
       send(fd);
     };
-    rec.start();
-    mic.classList.add('recording'); mic.textContent='⏹'; hint.textContent='Recording… tap to stop';
-  }catch(e){ errEl.textContent = 'Microphone blocked: '+e.message+' — allow mic access, or type the intake below.'; }
+    rec.start(); mic.classList.add('rec'); miclabel.textContent='Stop';
+  }catch(e){ errEl.textContent='Microphone blocked: '+e.message+' — allow mic access, or type below.'; }
 };
-
-$('go').onclick = () => {
-  const t=$('txt').value.trim(); if(!t){ errEl.textContent='Type an intake or use the mic.'; return; }
-  const fd=new FormData(); fd.append('text', t); fd.append('patient_id', $('pt').value); send(fd);
-};
+$('go').onclick=()=>{const t=$('txt').value.trim(); if(!t){errEl.textContent='Type an intake or use the mic.';return;}
+  const fd=new FormData(); fd.append('text',t); fd.append('patient_id',$('pt').value); send(fd);};
+$('txt').addEventListener('keydown',e=>{if(e.key==='Enter')$('go').click();});
 
 async function send(fd){
   errEl.textContent=''; spin.style.display='block'; $('result').style.display='none';
   try{
-    const r = await fetch('/intake',{method:'POST',body:fd});
-    const d = await r.json();
-    if(!r.ok){ throw new Error(d.detail || ('HTTP '+r.status)); }
+    const r=await fetch('/intake',{method:'POST',body:fd});
+    const d=await r.json();
+    if(!r.ok) throw new Error(d.detail||('HTTP '+r.status));
     render(d);
-  }catch(e){ errEl.textContent = 'Failed: '+e.message; }
+  }catch(e){ errEl.textContent='Failed: '+e.message; }
   finally{ spin.style.display='none'; }
 }
-
-function tags(el, arr){
-  el.innerHTML=''; if(!arr||!arr.length){ el.textContent='—'; return; }
-  arr.forEach(x=>{ const s=document.createElement('span'); s.textContent=x; el.appendChild(s); });
-}
-
+function chips(el,arr){el.innerHTML=''; (arr||[]).slice(0,5).forEach(x=>{const s=document.createElement('span');s.className='chip';s.textContent=x;el.appendChild(s);});}
 function render(d){
-  $('num').textContent = d.esi; $('num').style.background = ESI[d.esi]||'#889';
-  $('dp').textContent = 'Decision '+(d.esi_decision_point||'?');
-  $('cc').textContent = d.chief_complaint||'—';
-  $('crit').textContent = d.esi_criteria||'—';
-  tags($('res'), d.predicted_resources);
-  tags($('rf'), d.red_flags);
-  $('conf').textContent = (d.confidence!=null? Math.round(d.confidence*100)+'%':'—');
-  $('rat').textContent = d.rationale||'—';
-  $('spoken').textContent = d.spoken_summary? '“'+d.spoken_summary+'”':'';
-  $('transcript').textContent = d.transcript? 'Heard: “'+d.transcript+'”':'';
+  const n=$('num'); n.textContent=d.esi; n.className='n e'+d.esi;
+  $('dp').textContent='Decision '+(d.esi_decision_point||'?');
+  $('crit').textContent=d.esi_criteria||'';
+  chips($('res'),d.predicted_resources);
+  $('heard').textContent=d.transcript?('Heard: “'+d.transcript+'”'):'';
   $('result').style.display='block';
-  $('result').scrollIntoView({behavior:'smooth',block:'nearest'});
 }
 </script>
 </body>
