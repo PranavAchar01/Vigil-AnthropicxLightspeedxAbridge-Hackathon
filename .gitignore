@@ -47,3 +47,6 @@ config/*.jsonl
 data/sahiel/
 *.mov
 *.MOV
+
+# Real patient seizure footage — demo only, never commit (privacy)
+data/demo/
