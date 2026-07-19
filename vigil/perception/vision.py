@@ -111,6 +111,12 @@ class Params:
     mouth_seizure: float = _f("VIGIL_MOUTH_SEIZURE", 1.0)
     mouth_open_frac: float = _f("VIGIL_MOUTH_OPEN_FRAC", 0.22)
     mouth_sustain_s: float = _f("VIGIL_MOUTH_S", 0.4)
+    # head-tilt distress sign: eye-line roll from horizontal, sustained. Measured:
+    # normal looking-around never holds >=30 deg past 0.17s; a deliberate ear-to-
+    # shoulder tilt is 30-45 deg for as long as it's held. 0 disables.
+    tilt_seizure: float = _f("VIGIL_TILT_SEIZURE", 1.0)
+    tilt_deg: float = _f("VIGIL_TILT_DEG", 30.0)
+    tilt_sustain_s: float = _f("VIGIL_TILT_S", 0.6)
     # bookkeeping
     cooldown_s: float = _f("VIGIL_COOLDOWN_S", 6.0)
     unresponsive_cooldown_s: float = _f("VIGIL_UNRESPONSIVE_COOLDOWN_S", 15.0)
@@ -164,6 +170,7 @@ class PersonState:
     tremor_since: float = 0.0
     osc_since: float = 0.0  # spectral-oscillation seizure accumulator
     mouth_since: float = 0.0  # mouth-open distress-cry accumulator
+    tilt_since: float = 0.0  # sustained head-tilt accumulator
     upright_since: float = 0.0  # first frame of continuous upright evidence while down
     last_drop_ts: float = -1e9
     last_emit: dict = field(default_factory=dict)
@@ -647,6 +654,33 @@ class VisionDetector:
         elif ts - self.st.seizure_last > 2.0:  # shaking clearly stopped (> 2s) -> reset
             self.st.seizure_since = 0.0
 
+        # 2b) HEAD TILT — a sustained sideways head roll (ear toward shoulder) is a
+        # deliberate, unambiguous distress sign for the demo. Eye-line (fallback
+        # ear-line) angle from horizontal; normal looking-around never sustains
+        # >= tilt_deg past ~0.2s. Gated off while down / right after a fall.
+        roll = None
+        if self.p.tilt_seizure:
+            line = None
+            if vis[L_EYE] and vis[R_EYE]:
+                line = kp[R_EYE] - kp[L_EYE]
+            elif vis[L_EAR] and vis[R_EAR]:
+                line = kp[R_EAR] - kp[L_EAR]
+            if line is not None and (abs(line[0]) + abs(line[1])) > 1e-6:
+                a = abs(math.degrees(math.atan2(line[1], line[0])))
+                roll = min(a, 180.0 - a)
+            tilted = (
+                roll is not None
+                and roll >= self.p.tilt_deg
+                and not went_down
+                and ts - self.st.last_drop_ts >= 6.0
+            )
+            if tilted:
+                self.st.tilt_since = self.st.tilt_since or ts
+                if ts - self.st.tilt_since >= self.p.tilt_sustain_s:
+                    self._fire(ts, "seizure", 0.85, "SEIZURE DETECTED — head tilt")
+            else:
+                self.st.tilt_since = 0.0
+
         # 3) SLUMP — sustained lean (upright but degraded posture)
         if self.st.fsm == "upright":
             slumping = (
@@ -687,6 +721,7 @@ class VisionDetector:
             "still_s": round(ts - self.st.still_since, 1) if self.st.still_since else 0.0,
             "posture": posture,
             "head_below": bool(head_below),
+            "tilt": round(roll, 1) if roll is not None else 0.0,
         }
         if ts - self._last_status_ts >= 0.4:
             self._last_status_ts = ts
