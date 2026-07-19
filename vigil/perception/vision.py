@@ -72,6 +72,12 @@ class Params:
     ground_vy: float = _f("VIGIL_GROUND_VY", 0.30)
     # Exit 'down' after sustained POSITIVE upright evidence — even if motionless.
     down_exit_grace_s: float = _f("VIGIL_DOWN_EXIT_GRACE_S", 0.5)
+    # LYING FLAT (unconscious) without a witnessed fall: the body's long axis is
+    # near-horizontal (hips -> knees/ankles -> keypoint-PCA fallback chain) with a
+    # wide-ish box, or the box alone is unmistakably wide. Standing/sitting bodies
+    # are axis-vertical; a horizontal person is >= 65 deg regardless of hip visibility.
+    lying_axis_deg: float = _f("VIGIL_LYING_AXIS_DEG", 65.0)
+    lying_ar: float = _f("VIGIL_LYING_AR", 1.6)  # box w/h alone => lying, any framing
     # motion / stillness (shoulder-widths per second)
     still_motion: float = _f("VIGIL_STILL_MOTION", 0.55)
     motionless_s: float = _f("VIGIL_MOTIONLESS_S", 3.0)  # soft — shows quickly
@@ -594,9 +600,35 @@ class VisionDetector:
         # standing-still false positives. Once down, the state releases only on
         # sustained POSITIVE upright evidence (down_exit_grace_s) — which works even
         # for a person who stands up and then holds perfectly still.
-        truly_horizontal = torso_deg is not None and torso_deg >= self.p.torso_horiz_deg
+        # body long-axis angle from vertical (0 = upright, 90 = lying flat), from the
+        # best available anchors: torso (hips), else shoulders->knees/ankles, else a
+        # PCA over all visible keypoints — so a flat person is caught even when pose
+        # estimation drops the hips (common for horizontal bodies).
+        axis_deg = torso_deg
+        if axis_deg is None and vis[L_SH] and vis[R_SH]:
+            lower = [i for i in (11, 12, 13, 14, 15, 16) if vis[i]]  # hips/knees/ankles
+            if lower:
+                lo = kp[lower].mean(axis=0)
+                dxy = lo - sh_mid
+                if abs(dxy[0]) + abs(dxy[1]) > 1e-6:
+                    axis_deg = math.degrees(math.atan2(abs(dxy[0]), abs(dxy[1])))
+        if axis_deg is None:
+            pts = kp[vis]
+            if len(pts) >= 6:
+                c = pts - pts.mean(axis=0)
+                evals, evecs = np.linalg.eigh(c.T @ c)
+                v = evecs[:, -1]
+                axis_deg = math.degrees(math.atan2(abs(v[0]), abs(v[1])))
+
+        truly_horizontal = (
+            torso_deg is not None and torso_deg >= self.p.torso_horiz_deg
+        ) or (axis_deg is not None and axis_deg >= self.p.lying_axis_deg and ar >= 1.2)
         ground_hit = drop >= self.p.ground_drop_frac and vy >= self.p.ground_vy
-        lying = truly_horizontal or (ar >= self.p.ar_wide and low)
+        lying = (
+            truly_horizontal
+            or (ar >= self.p.ar_wide and low)
+            or ar >= self.p.lying_ar  # unmistakably wide box => lying, any framing
+        )
         if ground_hit or lying:
             self.st.fsm = "down"
             self.st.upright_since = 0.0
@@ -608,6 +640,7 @@ class VisionDetector:
             looks_upright = (
                 not head_below
                 and (torso_deg is None or torso_deg < 25.0)
+                and (axis_deg is None or axis_deg < 40.0)  # a flat body never "upright"
                 and not low
                 and ar < self.p.ar_wide
             )
@@ -722,6 +755,7 @@ class VisionDetector:
             "posture": posture,
             "head_below": bool(head_below),
             "tilt": round(roll, 1) if roll is not None else 0.0,
+            "axis": round(axis_deg, 1) if axis_deg is not None else -1.0,
         }
         if ts - self._last_status_ts >= 0.4:
             self._last_status_ts = ts
