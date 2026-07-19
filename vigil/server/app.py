@@ -443,6 +443,19 @@ async def pause_toggle():
     return {"paused": paused}
 
 
+@app.get("/calibrate/metrics")
+def calibrate_metrics(since: float = 0.0):
+    """Rolling per-frame detector metrics (osc/tremor/mouth/motion) for the live
+    webcam calibration loop (scripts/calibrate_seizure.py). Read-only."""
+    from vigil.perception import vision
+
+    det = vision.ACTIVE_DETECTOR
+    if det is None:
+        raise HTTPException(status_code=503, detail="vision not running")
+    rows = [r for r in list(det.metric_log) if r["ts"] > since]
+    return {"now": time.time(), "rows": rows}
+
+
 @app.get("/faces/{patient_id}.jpg")
 def patient_avatar(patient_id: str):
     """Serve the enrolled face image for a patient (chart-card avatar)."""

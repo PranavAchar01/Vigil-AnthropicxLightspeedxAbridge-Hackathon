@@ -118,6 +118,10 @@ class Params:
 
 P = Params()
 
+# The live detector instance (set by run_vision) — lets the server's calibration
+# endpoint read the rolling metric log without threading the object through.
+ACTIVE_DETECTOR = None
+
 Sink = Callable[[PerceptionEvent], None]
 # (track_id, posture, motion_level, moved) — per-frame live status for the voice agent
 StatusSink = Callable[[int, str, str, bool], None]
@@ -193,6 +197,9 @@ class VisionDetector:
         # on high-fps sources (256 covers 1.28s at 200 fps); a too-small buffer would
         # silently fail the window-span guard on EVERY frame above ~61 fps.
         self._flow_hist: deque = deque(maxlen=256)
+        # rolling per-frame metric log (~4 min @ 17 fps) for live calibration
+        # (scripts/calibrate_seizure.py reads it via the server's /calibrate/metrics)
+        self.metric_log: deque = deque(maxlen=4096)
 
     # ------------------------------------------------------------------ helpers
     def reset_stream(self) -> None:
@@ -288,6 +295,19 @@ class VisionDetector:
         self._tremor(frame, box, ts)
         self._flow_osc(frame, box, ts)
         self._mouth(frame, kp, kc, ts)
+        m = self.metrics
+        self.metric_log.append(
+            {
+                "ts": round(ts, 3),
+                "fsm": self.st.fsm,
+                "motion": m.get("motion", 0.0),
+                "osc_amp": m.get("osc_amp", 0.0),
+                "osc_conc": m.get("osc_conc", 0.0),
+                "osc_on": bool(self.st.osc_since),
+                "tremor": m.get("tremor", 0.0),
+                "mouth": m.get("mouth", 0.0),
+            }
+        )
         return res
 
     def _mouth(self, frame, kp, kc, ts: float) -> None:
@@ -360,9 +380,13 @@ class VisionDetector:
         mask[y1:y2, x1:x2] = True
         net_x = float(flow[..., 0][mask].mean())
         net_y = float(flow[..., 1][mask].mean())
-        if (~mask).any():  # subtract global (camera) motion
-            net_x -= float(flow[..., 0][~mask].mean())
-            net_y -= float(flow[..., 1][~mask].mean())
+        # Subtract global (camera) motion — but only when enough background is visible
+        # to estimate it. A webcam close-up fills the frame with the person; the tiny
+        # leftover strip is noise, and a webcam is static anyway, so skip subtraction.
+        bg = ~mask
+        if float(bg.mean()) >= 0.15:
+            net_x -= float(flow[..., 0][bg].mean())
+            net_y -= float(flow[..., 1][bg].mean())
         self._osc_step(ts, net_x, net_y)
 
     def _osc_step(self, ts: float, net_x: float, net_y: float) -> None:
@@ -386,6 +410,7 @@ class VisionDetector:
         t_u = np.linspace(t_arr[0], t_arr[-1], n_u)
         fs = (n_u - 1) / max(t_arr[-1] - t_arr[0], 1e-3)
         passing = False
+        best_amp, best_conc = 0.0, 0.0
         for raw in (np.array([r[2] for r in win]), np.array([r[1] for r in win])):  # y first
             sig = np.interp(t_u, t_arr, raw)
             seg = sig - sig.mean()
@@ -397,10 +422,13 @@ class VisionDetector:
                 continue
             amp = float(mag[band].max()) / (len(seg) / 2)
             conc = float(mag[band].max() / (mag[nz].max() + 1e-9))
-            self.metrics["osc_amp"], self.metrics["osc_conc"] = round(amp, 3), round(conc, 2)
+            if amp > best_amp:
+                best_amp, best_conc = amp, conc
             if amp >= p.osc_amp and conc >= p.osc_conc:
                 passing = True
                 break
+        # log the strongest axis (calibration + overlay read these)
+        self.metrics["osc_amp"], self.metrics["osc_conc"] = round(best_amp, 3), round(best_conc, 2)
         grounded = self.st.fsm == "down"
         recent_fall = ts - self.st.last_drop_ts < 6.0  # fall impact must not read as seizure
         if passing and not grounded and not recent_fall:
@@ -846,6 +874,8 @@ def run_vision(
     import cv2
 
     det = VisionDetector(model_path=model_path, device=device, emit=sink, emit_status=status_sink)
+    global ACTIVE_DETECTOR
+    ACTIVE_DETECTOR = det
 
     from vigil.config import settings
 
@@ -865,6 +895,11 @@ def run_vision(
 
     # optional on-device face recognition -> which patient is on camera
     recognizer, gallery, last_pid, frame_i = None, None, None, 0
+    # Identity gate: require an ENROLLED face before any monitoring/events (see the
+    # gate in the loop). 0 disables; grace keeps an incident tracked face-down.
+    require_face = os.environ.get("VIGIL_REQUIRE_ENROLLED_FACE", "1").lower() in ("1", "true", "yes")
+    face_grace_s = _f("VIGIL_FACE_GRACE_S", 20.0)
+    verified_until = 0.0
 
     if settings.face_gallery_path.exists():
         try:
@@ -940,15 +975,49 @@ def run_vision(
                 continue
 
             frame_i += 1
-            if recognizer and gallery and frame_i % settings.face_identify_every_n == 0:
-                try:
-                    emb = recognizer.embed_largest(frame)
-                    match = gallery.identify(emb) if emb is not None else None
-                    if match and match[0] != last_pid:
-                        last_pid = match[0]
-                        identify_sink(match[0], match[1], round(match[2], 3))
-                except Exception:  # noqa: BLE001 — recognition must never break the feed
-                    pass
+            # Identity gate: ONLY enrolled patients (the face gallery) are monitored.
+            # A match opens a grace window (face_grace_s) so an incident — where the
+            # face goes unrecognizable (on the ground, blurred) — keeps being tracked;
+            # strangers never open the window, so they produce no events, no pages.
+            # Fails OPEN when the face stack isn't available (no gallery enrolled).
+            if recognizer and gallery:
+                every = settings.face_identify_every_n
+                if require_face and time.time() >= verified_until:
+                    every = max(3, every // 3)  # unverified → check faster to acquire
+                if frame_i % every == 0:
+                    try:
+                        emb = recognizer.embed_largest(frame)
+                        match = gallery.identify(emb) if emb is not None else None
+                        if match:
+                            if require_face and time.time() >= verified_until:
+                                det.reset_stream()  # fresh history: don't inherit a stranger's
+                            verified_until = time.time() + face_grace_s
+                            if match[0] != last_pid:
+                                last_pid = match[0]
+                                identify_sink(match[0], match[1], round(match[2], 3))
+                    except Exception:  # noqa: BLE001 — recognition must never break the feed
+                        pass
+
+            monitored = (
+                not require_face
+                or recognizer is None
+                or gallery is None
+                or time.time() < verified_until
+            )
+            if not monitored:
+                cv2.putText(
+                    frame,
+                    "NOT ENROLLED — monitoring paused",
+                    (12, 60),
+                    cv2.FONT_HERSHEY_SIMPLEX,
+                    0.9,
+                    (0, 200, 255),
+                    2,
+                )
+                ok, jpg = cv2.imencode(".jpg", frame, [cv2.IMWRITE_JPEG_QUALITY, 70])
+                if ok:
+                    frame_buffer.set(jpg.tobytes())
+                continue
 
             ts = time.time()
             res = det.process(frame, ts=ts)
