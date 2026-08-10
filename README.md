@@ -1,370 +1,166 @@
-# Vigil — always-on, multimodal re-triage for the waiting room
+# Vigil 🏆 - Finalist (Top 6 of 115), Anthropic x Lightspeed x Abridge Hackathon
 
-> A patient is usually triaged once, then may spend hours in a waiting room while
-> their condition continues to change. Vigil continuously watches each patient,
-> connects new visual and vocal signals to their clinical context, and brings a
-> clinician back into the loop when their urgency may have increased.
+**An always-on, identity-aware re-triage agent for the emergency waiting room.**
 
-**Vigil is an identity-aware patient monitoring and continuous re-triage agent.**
-It begins with a voice or video intake, creates an initial patient risk profile,
-links the arriving patient to that profile, and then uses cameras and microphones
-to monitor changes over time. When Vigil finds evidence of deterioration, it
-re-assesses the patient's Emergency Severity Index (ESI), checks in with the
-patient when appropriate, calls the charge nurse, and documents the incident as
-a clinical note and FHIR record.
+[![Tests](https://img.shields.io/badge/tests-44%20passing-brightgreen)](tests)
+[![Python](https://img.shields.io/badge/Python-3.12+-3776AB)](pyproject.toml)
+[![Reasoning](https://img.shields.io/badge/Claude-re--triage-D97757)](vigil/reasoning)
+[![Perception](https://img.shields.io/badge/YOLO11--pose%20%2B%20AST-on--device-00A67E)](vigil/perception)
+[![Escalation](https://img.shields.io/badge/ElevenLabs%20%2B%20Twilio-real%20calls-5B21B6)](vigil/escalation)
+[![Interop](https://img.shields.io/badge/FHIR-R4%20bundle-E7352C)](vigil/documentation)
+[![License](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 
-Vigil is designed as a conservative clinical decision-support layer. It does not
-diagnose patients or replace nurses. It watches the gap between initial triage and
-clinical care.
-
-Built at the **Abridge hackathon — The Future of Agentic AI in Healthcare.**
+A patient is triaged once, then waits. Vigil watches the hours after that snapshot: a camera and microphone run pose, distress-audio, and face-recognition models locally, a sliding-window fuser turns raw signals into evidence, and Claude re-scores the patient's Emergency Severity Index against their own synthetic FHIR chart. When urgency rises, Vigil speaks to the patient, calls the charge nurse with a chart-grounded summary, and writes the incident out as a SOAP note and a FHIR R4 transaction bundle. Safety-critical rules - the monotonic ESI clamp, the fail-safe on API failure - live in code, never in a prompt.
 
 ---
 
-## The problem
+## How It Works
 
-Triage is a snapshot. A waiting room is a timeline.
+One incident travels the whole system in a few seconds:
 
-A patient's initial ESI may be appropriate when they arrive, but their condition
-can deteriorate while they wait. Staff cannot continuously observe every patient,
-and a conventional security camera has no understanding of the patient's medical
-history, original complaint, or changing symptoms.
+1. **Perception.** A webcam runs **YOLO11-pose + ByteTrack** and a microphone runs an **Audio Spectrogram Transformer** fine-tuned on AudioSet. Each raises discrete `PerceptionEvent`s: `fainted`, `seizure`, `scream`, `slump`.
+2. **Identity.** **InsightFace/ArcFace** embeds the largest visible face on device and matches it against a local gallery of 512-d vectors, pulling up the right synthetic chart automatically. No images stored, nothing uploaded.
+3. **Fusion.** The `EventFuser` holds a 4-second sliding window and a cooldown. A scream *and* a fall together is a far stronger emergency than either alone, and the cooldown stops one event re-firing every frame. Out comes a severity-tagged `FusedEvent`.
+4. **Reasoning.** Claude re-triages the fused event against the chart - conditions, medications, latest vitals, prior ESI - through a single strict tool call, returning prior ESI, proposed ESI, evidence, action, and a spoken nurse summary.
+5. **Safety clamp.** Code, not the model, enforces that the ESI may only get *more* urgent, and corrects the action if the model's action and its own severity disagree. An API failure fails safe rather than silently holding.
+6. **Escalation ladder.** Hard evidence pages the nurse now. Ambiguous evidence talks to the **patient** first over an ElevenLabs voice agent and pages a human only on a bad or absent answer. Reassuring evidence keeps watching.
+7. **Documentation.** The completed incident writes a SOAP note plus a seven-resource FHIR R4 transaction bundle to `data/incidents/`, and the whole trace streams to a live dashboard over WebSocket.
 
-Vigil combines those missing pieces:
-
-- **Identity:** Which monitored patient is this?
-- **Clinical context:** Why are they here, and what makes them high risk?
-- **Continuous perception:** How are their movement, posture, voice, and behavior
-  changing over time?
-- **Re-triage:** Does the accumulated evidence justify a more urgent ESI?
-- **Action:** Should Vigil keep watching, speak to the patient, or immediately
-  bring in a nurse?
-- **Documentation:** Can the escalation document itself in a clinical format?
-
----
-
-## Product vision
-
-```text
-PRE-ARRIVAL / CHECK-IN
-Voice or video intake
-        ↓
-Symptoms + history + initial predicted ESI
-        ↓
-Patient monitoring profile
-        ↓
-Identity enrollment at arrival
-
-CONTINUOUS WAITING-ROOM MONITORING
-Face-to-patient association + persistent body tracking
-        ↓
-Video + audio + behavior over time
-        ↓
-Patient-specific deterioration assessment
-        ↓
-Hold, voice check-in, or immediate nurse escalation
-
-CLOSE THE LOOP
-Chart-grounded spoken summary to the nurse
-        ↓
-Ambient SOAP incident note
-        ↓
-FHIR transaction bundle
-```
-
-### 1. Intake and initial ESI
-
-A voice or video agent collects the patient's name, chief complaint, symptoms,
-history, medications, and relevant warning signs. That conversation produces:
-
-- a patient ID and monitoring profile;
-- a transcript and concise clinical summary;
-- an initial predicted ESI;
-- patient-specific risk factors to watch during the wait.
-
-For the hackathon, all clinical records are synthetic. A video intake or a
-consented check-in kiosk can also enroll the patient's identity for the demo.
-
-### 2. Link the physical patient to the chart
-
-At arrival, Vigil associates the person in the waiting room with their patient
-profile. The intended identity pipeline is:
-
-```text
-Consented face enrollment → patient ID → clinical chart → initial ESI
-                                ↓
-                       live camera track ID
-```
-
-Face matching answers **who the patient is**. YOLO/ByteTrack answers **where the
-patient is now**. Pose and audio models answer **what is changing**. The clinical
-agent decides **whether that change affects urgency**.
-
-The current demo performs on-device face recognition with InsightFace/ArcFace.
-It stores 512-dimensional embeddings in a local gallery, periodically matches the
-largest visible face, and automatically selects the corresponding synthetic
-patient chart. Raw enrollment images are used only to build the local demo
-gallery. Persistent multi-person face-to-track association remains planned.
-
-### 3. Always-on multimodal monitoring
-
-Vigil is not only a scream or fall detector. Those are high-visibility examples
-inside a broader continuous monitoring loop. The intended signal catalog includes:
-
-- falls, collapse, loss of balance, and seizure-like movement;
-- progressive slumping, posture decay, or prolonged motionlessness;
-- gait changes, agitation, pacing, confusion, or attempts to leave;
-- chest clutching, guarding, repeated bending, or visible distress;
-- screams, calls for help, groaning, coughing changes, or labored breathing;
-- statements such as “I cannot breathe,” “my chest hurts,” or “I feel worse”;
-- a meaningful deviation from that patient's own recent baseline.
-
-The important unit is not a single video frame. Vigil maintains temporal evidence
-and asks whether the patient's condition is changing across seconds and minutes.
-
-No system can recognize literally every possible medical event. Vigil therefore
-combines a defined set of safety signals with anomaly detection, confidence
-thresholds, patient check-ins, and human escalation.
-
-### 4. Patient-specific re-triage
-
-The same visible behavior can mean different things for different patients. A
-collapse in a patient with hypoxemia or cardiac disease is different from the same
-motion in a healthy control. A fall in a patient taking an anticoagulant carries a
-different bleeding risk.
-
-The reasoning agent combines:
-
-```text
-initial ESI
-+ intake conversation
-+ active conditions and medications
-+ latest charted vitals
-+ current visual observations
-+ current audio observations
-+ change from the patient's recent baseline
-+ previous check-in responses
-```
-
-It returns a structured decision containing the prior ESI, proposed new ESI,
-supporting evidence, action, and a short spoken summary for the nurse.
-
-### 5. Severity-aware escalation
-
-- **Hard evidence:** Call or page the nurse immediately.
-- **Ambiguous evidence:** Speak to the patient first; page a human if the answer
-  is concerning or absent.
-- **Reassuring evidence:** Continue monitoring and preserve the event history.
-- **Monotonic safety:** Vigil may increase urgency but never decrease it. Because
-  ESI 1 is most acute, the new ESI number may only stay the same or go down.
-
-### 6. Ambient documentation
-
-Every completed incident produces an Abridge-style SOAP note and a FHIR R4
-transaction bundle. The bundle contains an Encounter, ESI Observation, detected
-event Observation, SOAP DocumentReference, transcript DocumentReference, safety
-Flag, and nurse Communication.
-
-The escalation therefore creates its own structured audit trail.
-
----
-
-## Current implementation
-
-This repository implements the core perceive → reason → act → document loop:
-
-```text
-Camera + microphone
-        ↓
-YOLO pose events + audio distress events
-        ↓
-Sliding-window event fusion
-        ↓
-Claude re-triage against a synthetic FHIR chart
-        ↓
-Code-enforced monotonic ESI safety rules
-        ↓
-ElevenLabs or Twilio nurse call
-        ↓
-SOAP note + local FHIR transaction bundle
-        ↓
-Live FastAPI/WebSocket dashboard
-```
-
-Implemented today:
-
-- webcam pose tracking with fall, slumping, and motionlessness detection;
-- microphone scream/distress detection using YAMNet or a lightweight fallback;
-- hard/soft event fusion with cooldown protection;
-- chart extraction from the Abridge synthetic FHIR dataset;
-- Claude-based structured re-triage;
-- code-level monotonic ESI enforcement and fail-safe escalation;
-- patient voice check-in policy;
-- ElevenLabs conversational calls with direct Twilio fallback;
-- an ElevenLabs conversational agent that can securely request the active
-  patient's live posture, motion, last event, and ESI status during a call;
-- on-device face enrollment and face-to-chart selection using InsightFace;
-- SOAP note generation and a seven-resource FHIR transaction bundle;
-- a local live dashboard plus a Next.js command center for patient context,
-  perception, reasoning, escalation, and documentation;
-- optional Supabase event mirroring for remote observability;
-- offline tests for safety-critical policy and FHIR bundle shape.
-
-Planned for the full demo architecture:
-
-- voice/video intake and initial ESI estimation;
-- patient registry and monitoring profiles;
-- persistent mapping of multiple camera track IDs to individual patient monitors;
-- simultaneous monitoring of multiple patients;
-- longer temporal baselines and a broader visual/audio event catalog;
-- natural-language distress understanding;
-- multi-patient dashboard controls and a reliable demo simulation path;
-- optional submission of the generated bundle to a real FHIR endpoint.
-
-The current implementation is a single-participant demo. A recognized face can
-automatically replace the manually selected active patient, but pose observations
-are still routed to that one active profile rather than maintaining independent
-state for every visible track.
+The thesis is simple: triage is a snapshot, a waiting room is a timeline. Vigil watches the gap.
 
 ---
 
 ## Architecture
 
-```text
-vigil/
-  config.py            # environment-driven models, credentials, and thresholds
-  events.py            # typed objects passed through the complete pipeline
-  chart.py             # synthetic FHIR data → compact PatientChart
-  perception/
-    vision.py          # YOLO pose + ByteTrack → fall/slump/motionless events
-    audio.py           # microphone → scream/distress events
-    fusion.py          # signals → severity-tagged FusedEvent
-    faces.py           # local ArcFace embeddings → synthetic patient identity
-  reasoning/
-    prompts.py         # conservative re-triage policy + strict output schema
-    triage.py          # Claude call + code-enforced ESI safety rules
-  escalation/
-    ladder.py          # hold, patient check-in, or immediate nurse call
-    elevenlabs_call.py # ElevenLabs calls and check-in transcript evaluation
-    twilio_call.py     # direct Twilio TTS fallback
-  documentation/
-    abridge_note.py    # SOAP note + FHIR R4 transaction Bundle
-  server/
-    app.py             # FastAPI orchestration and application endpoints
-    bus.py             # WebSocket event fan-out and isolated video frame buffer
-    status.py          # live patient state exposed to the voice agent
-    supabase_sink.py   # optional remote event mirror
-  dashboard/
-    index.html         # live patient, reasoning, call, and note interface
-scripts/
-  extract_demo_cohort.py # source FHIR dataset → small synthetic demo cohort
-  enroll_faces.py        # consenting demo photos → local embedding gallery
-  setup_elevenlabs.py    # create voice agent and import a Twilio number
-supabase/
-  schema.sql              # remote observability event table
-web/                      # Next.js/Vercel command center
-tests/
-  test_core.py           # fusion, escalation, ESI, vision, and FHIR safety tests
+```mermaid
+flowchart TD
+    subgraph PERCEIVE["Perceive - local models, no cloud vision"]
+        CAM[Webcam] --> POSE["YOLO11-pose + ByteTrack<br/>fall / seizure / slump"]
+        CAM --> FACE["InsightFace ArcFace<br/>512-d local gallery"]
+        MIC[Microphone] --> AST["AST AudioSet classifier<br/>scream / distress"]
+        POSE --> FUSE[EventFuser · 4s window + cooldown]
+        AST --> FUSE
+    end
+
+    subgraph REASON["Reason - chart-grounded"]
+        FACE --> CHART["PatientChart<br/>(synthetic FHIR R4)"]
+        FUSE --> TRIAGE["Claude re-triage<br/>strict tool call"]
+        CHART --> TRIAGE
+        TRIAGE --> CLAMP["Monotonic ESI clamp<br/>+ fail-safe action fix (code)"]
+    end
+
+    subgraph ACT["Act - severity-aware ladder"]
+        CLAMP --> LADDER{Evidence}
+        LADDER -->|hard| NURSE[Page charge nurse]
+        LADDER -->|ambiguous| CHECKIN[Voice check-in with patient]
+        LADDER -->|reassuring| HOLD[Keep watching]
+        CHECKIN -->|bad or no answer| NURSE
+        NURSE --> CALL["ElevenLabs agent<br/>(Twilio TTS fallback)"]
+    end
+
+    subgraph DOC["Document - ambient output"]
+        CLAMP --> SOAP[SOAP incident note]
+        SOAP --> BUNDLE["FHIR R4 transaction bundle<br/>7 resources"]
+    end
+
+    CLAMP --> BUS[SceneBus · WebSocket /events]
+    BUS --> DASH["Local dashboard + Next.js command center"]
+    BUS -.optional.-> SUPA[(Supabase mirror)]
 ```
 
-### Runtime event model
-
-- `PerceptionEvent`: one visual or audio observation.
-- `FusedEvent`: correlated signals that justify re-triage.
-- `TriageDecision`: structured ESI decision and recommended action.
-- `EscalationAction`: patient check-in, nurse call, or no action.
-- `BusEvent`: real-time dashboard update.
-
-### Server interfaces
-
-- `GET /` — dashboard
-- `GET /health` — configured capabilities and active patient
-- `GET /video` — MJPEG camera stream
-- `WS /events` — real-time JSON event stream
-- `GET /patients` — loaded demo cohort
-- `POST /active/{patient_id}` — select the active demo patient
-- `GET /agent/patient-status` — token-protected live status for the voice agent
-- `GET /agent/patient-status/{patient_id}` — token-protected status by patient
-- `POST /webhooks/elevenlabs` — mirror completed call turns into the event log
-
-Run the server with one Uvicorn worker because the event bus, camera frame buffer,
-and patient state are currently in process.
+Everything is organized around one chain of typed contracts: `PerceptionEvent` → `FusedEvent` → `TriageDecision` → `EscalationAction` → `BusEvent`. Every component either produces or consumes one of them, so the ladder, the documentation layer, and the dashboards are all testable without a camera in the room.
 
 ---
 
-## Abridge integration
+## Pipeline and Components
 
-Vigil extends Abridge's ambient documentation thesis across the complete incident:
-
-- **Chart in:** Conditions, medications, demographics, and latest vitals from a
-  synthetic FHIR R4 record ground the re-triage decision.
-- **Ambient event in:** The waiting-room interaction becomes another clinical
-  episode rather than disappearing when the patient reaches the front desk.
-- **Note out:** Vigil generates a SOAP incident note and transcript.
-- **FHIR out:** The note, ESI change, event, safety flag, and nurse communication
-  are packaged as a transaction bundle linked to the patient.
-
-The current implementation writes bundles to `data/incidents/`. They are
-POST-ready but are not automatically submitted to an external FHIR server.
+| Component | Role | Technology |
+|---|---|---|
+| `perception/vision.py` | Pose tracking → fall, seizure, slump, motionless events | Ultralytics YOLO11-pose + ByteTrack + OpenCV |
+| `perception/audio.py` | Microphone → scream and distress events | AST (`MIT/ast-finetuned-audioset`), loudness fallback |
+| `perception/faces.py` | Bind the person on camera to their chart | InsightFace ArcFace, 512-d local gallery, onnxruntime |
+| `perception/fusion.py` | Sliding-window correlation, severity tagging, cooldown | Pure Python, fully unit-tested |
+| `chart.py` | Synthetic FHIR record → compact `PatientChart` | Abridge synthetic dataset |
+| `reasoning/triage.py` | Chart-grounded ESI re-triage + code-enforced safety | Claude via strict tool call |
+| `reasoning/initial_triage.py` | First ESI from a spoken intake, ESI v4 decision tree | Claude, fails safe to ESI 2 |
+| `reasoning/voice_intake.py` | Spoken intake → transcript | ElevenLabs Scribe STT |
+| `escalation/ladder.py` | Hold, patient check-in, or page - injected call handlers | Pure policy, no vendor coupling |
+| `escalation/elevenlabs_call.py` | Live outbound calls, check-in transcript grading | ElevenLabs conversational agent |
+| `escalation/twilio_call.py` | Direct TTS fallback when the agent is unavailable | Twilio |
+| `documentation/abridge_note.py` | SOAP note + FHIR R4 transaction bundle | Claude, deterministic fallback |
+| `server/` | Orchestration, WebSocket fan-out, MJPEG video, live status | FastAPI + Uvicorn |
+| `tuning/` | Closed-loop optimizer for every threshold in the system | Offline eval + annealed search |
 
 ---
 
-## Setup
+## Repo Structure
 
-### Requirements
+```
+vigil/
+  config.py              Environment-driven models, credentials, thresholds
+  events.py              Typed contracts passed through the whole pipeline
+  chart.py               Synthetic FHIR data -> compact PatientChart
+  perception/
+    vision.py            YOLO pose + ByteTrack -> fall/seizure/slump events
+    audio.py             Microphone -> AST scream/distress events
+    fusion.py            Signals -> severity-tagged FusedEvent
+    faces.py             Local ArcFace embeddings -> patient identity
+  reasoning/
+    prompts.py           Conservative re-triage policy + strict output schema
+    triage.py            Claude re-triage + code-enforced ESI safety rules
+    initial_triage.py    First ESI from intake (ESI v4 tree, fail-safe)
+    voice_intake.py      ElevenLabs Scribe speech-to-text
+  escalation/
+    ladder.py            Hold, patient check-in, or immediate nurse call
+    elevenlabs_call.py   Outbound calls + check-in transcript evaluation
+    twilio_call.py       Direct Twilio TTS fallback
+  documentation/
+    abridge_note.py      SOAP note + FHIR R4 transaction bundle
+  server/
+    app.py               FastAPI orchestration and endpoints
+    bus.py               WebSocket fan-out + isolated video frame buffer
+    status.py            Live patient state exposed to the voice agent
+    supabase_sink.py     Optional remote event mirror
+  tuning/                Closed-loop optimizer for vision/audio/fusion/face/reasoning
+  dashboard/index.html   Live patient, reasoning, call, and note interface
+scripts/                 Cohort extraction, face enrollment, calibration, tuning, preflight
+web/                     Next.js/Vercel command center
+supabase/schema.sql      Remote observability event table
+tests/                   Fusion, escalation, ESI, vision, call-gate, and FHIR safety tests
+```
 
-- Python 3.12+
-- `uv`
-- webcam and microphone for live perception
-- optional InsightFace dependencies for face-to-chart recognition
-- Abridge synthetic FHIR dataset for the demo cohort
-- Anthropic API key for re-triage reasoning
-- ElevenLabs/Twilio configuration for real outbound calls
-- optional Supabase project and Node.js/pnpm for the remote command center
+---
 
-### Install
+## Quick Start
+
+Requires Python 3.12+, [`uv`](https://docs.astral.sh/uv), a webcam, and a microphone. Development was done on MacBooks.
 
 ```bash
+git clone https://github.com/PranavAchar01/Vigil-AnthropicxLightspeedxAbridge-Hackathon.git
+cd Vigil-AnthropicxLightspeedxAbridge-Hackathon
 uv sync
 cp .env.example .env
 ```
 
-Install local face recognition support when using the identity demo:
-
-```bash
-uv sync --extra faces
-uv run python scripts/enroll_faces.py
-```
-
-Set `VIGIL_DATASET_PATH` in `.env` to the synthetic FHIR JSONL file, then build
-the demo cohort:
-
-```bash
-uv run python scripts/extract_demo_cohort.py
-```
-
-Start Vigil:
-
-```bash
-uv run uvicorn vigil.server.app:app --port 8000
-```
-
-Open <http://localhost:8000>.
-
-### Capabilities and graceful degradation
-
-| Layer | Requirement | Behavior when unavailable |
-|---|---|---|
-| Cohort | `data/demo_cohort.json` | Server starts without an active patient |
-| Reasoning | `ANTHROPIC_API_KEY` | Incident stops before clinical re-triage |
-| Vision | Webcam + OpenCV/Ultralytics | Vision thread is disabled |
-| Audio | Microphone + `sounddevice` | Audio thread is disabled |
-| Audio ML | `pip install '.[audio]'` | Uses energy/spectral heuristic fallback |
-| Face identity | `uv sync --extra faces` + enrolled gallery | Uses the selected active patient |
-| Nurse call | ElevenLabs or Twilio credentials | Action is recorded as failed/not configured |
-| SOAP note | Anthropic key | Uses deterministic chart-grounded fallback |
-| FHIR | No external credentials required | Bundle is written locally |
-| Remote feed | Supabase credentials | Local dashboard and event bus continue working |
+1. **Set your keys** in `.env`: `ANTHROPIC_API_KEY` for reasoning, and `ELEVENLABS_API_KEY` / Twilio credentials if you want real outbound calls.
+2. **Build the demo cohort.** Point `VIGIL_DATASET_PATH` at the Abridge synthetic FHIR JSONL file, then:
+   ```bash
+   uv run python scripts/extract_demo_cohort.py
+   ```
+3. **Optional - enable face-to-chart identity:**
+   ```bash
+   uv sync --extra faces
+   uv run python scripts/enroll_faces.py
+   ```
+4. **Check the machine is ready** (deps, secrets, cohort, models, tunnel config):
+   ```bash
+   uv run python scripts/preflight.py
+   ```
+5. **Run it:**
+   ```bash
+   uv run uvicorn vigil.server.app:app --port 8000
+   ```
+   Open <http://localhost:8000>. Use **one** Uvicorn worker - the event bus, frame buffer, and patient state are in-process.
 
 ### Configure the nurse call
 
@@ -375,7 +171,7 @@ uv run python scripts/setup_elevenlabs.py import-number \
   --phone +1... --sid AC... --token ...
 ```
 
-Place the resulting IDs and the charge nurse's demo phone number in `.env`:
+Put the resulting IDs and the charge nurse's demo number in `.env`:
 
 ```text
 ELEVENLABS_AGENT_ID=...
@@ -383,71 +179,155 @@ ELEVENLABS_PHONE_NUMBER_ID=...
 NURSE_PHONE_NUMBER=+1...
 ```
 
-Never commit `.env` or real patient information.
+Never commit `.env` or real patient information. Secrets, the cohort, model weights, and the face gallery are all gitignored.
 
----
-
-## Test
+### Run the command center
 
 ```bash
-uv run pytest
+cd web
+pnpm install
+pnpm dev
 ```
 
-The offline suite covers multimodal fusion, cooldown behavior, escalation policy,
-the monotonic ESI clamp, fail-safe action correction, fall geometry, and FHIR
-transaction bundle shape.
+---
+
+## Signals and the Escalation Ladder
+
+The perception layer raises four real signals plus two UI-only provisional ones. Severity, not the model's opinion, picks the rung:
+
+| Signal | Modality | Severity | Meaning |
+|---|---|---|---|
+| `fainted` | vision | hard | Went down and stayed down for 5s+ |
+| `seizure` | vision | hard | Oscillatory convulsion sustained 5s+ |
+| `scream` | audio | hard | AudioSet distress vocalization |
+| `slump` | vision | soft | Sustained posture degradation |
+| `fall_detected` | vision | UI only | Fall seen - 5s validation countdown running |
+| `fall_cleared` | vision | UI only | Got back up before validating, no escalation |
+
+| Rung | Trigger | What happens |
+|---|---|---|
+| `page_immediately` | Hard evidence, or a hard + soft fusion | Charge nurse is called now with a chart-grounded summary |
+| `voice_checkin` | Ambiguous soft evidence | Vigil talks to the **patient** first; pages on a bad or absent answer |
+| `hold` | Reassuring evidence | Keep watching, preserve the event history |
+
+Two invariants are enforced in code and never delegated to the model: **ESI is monotonic** (because ESI 1 is most acute, the new number may only stay the same or go down), and a **reasoning failure fails safe** rather than quietly holding.
 
 ---
 
-## Safety, privacy, and scope
+## Tech Stack
 
-- **Clinical decision support, not diagnosis:** Vigil recommends attention; a
-  clinician makes the medical decision.
-- **Monotonic re-triage:** Vigil can add urgency but cannot remove it.
-- **Human escalation:** Ambiguous or serious evidence brings a person into the
-  loop rather than autonomously treating the patient.
-- **Synthetic demo data:** The hackathon cohort contains no real patient records.
-- **Consent for identity:** Face enrollment must be explicit and limited to the
-  monitoring episode.
-- **Data minimization:** The target design uses face embeddings and derived pose
-  events, with short retention and access controls, instead of treating raw video
-  as a clinical record.
-- **Honest perception limits:** Vigil detects supported signals and anomalies; it
-  does not claim to recognize every possible emergency.
-- **Prototype status:** This project is not a validated medical device and must
-  not be used for real clinical care.
+| Layer | Technology |
+|---|---|
+| Vision | Ultralytics YOLO11-pose, ByteTrack, OpenCV |
+| Audio | Audio Spectrogram Transformer on AudioSet (Transformers), heuristic fallback |
+| Identity | InsightFace ArcFace embeddings via onnxruntime, local only |
+| Reasoning | Claude with strict tool-call schemas, code-enforced ESI safety rules |
+| Voice | ElevenLabs conversational agent + Scribe STT, Twilio TTS fallback |
+| Interop | FHIR R4 transaction bundles, Abridge synthetic dataset |
+| Server | FastAPI, Uvicorn, WebSocket event bus, MJPEG video |
+| Frontends | Local HTML dashboard, Next.js/Vercel command center |
+| Observability | Optional Supabase event mirror |
+| Tuning | In-repo closed-loop optimizer with deterministic offline evals |
 
 ---
 
-## Hackathon contribution
+## Server Interfaces
 
-Original work in this repository includes:
-
-- the fused visual/audio perception pipeline;
-- the chart-grounded, monotonic re-triage agent;
-- the severity-aware patient-check-in and nurse-escalation ladder;
-- dynamic chart-grounded ElevenLabs/Twilio calling;
-- ambient SOAP documentation and FHIR incident packaging;
-- the live reasoning and escalation dashboard;
-- the evolving identity-aware, always-on monitoring architecture described here.
-
-Pre-existing technologies include Ultralytics YOLO, ByteTrack, OpenCV, YAMNet,
-Anthropic and ElevenLabs APIs, Twilio, FastAPI, and the provided synthetic FHIR
-dataset.
+- `GET /` - live dashboard
+- `GET /intake` - voice intake page
+- `POST /intake` - upload spoken intake audio, get transcript and initial ESI
+- `GET /health` - configured capabilities and active patient
+- `GET /video` - MJPEG camera stream
+- `WS /events` - real-time JSON event stream
+- `GET /patients` - loaded demo cohort
+- `POST /active/{patient_id}` - select the active demo patient
+- `POST /pause` - pause and resume perception
+- `GET /calibrate/metrics` - raw detector metrics for the calibration scripts
+- `GET /agent/patient-status[/{patient_id}]` - token-protected live status for the voice agent
+- `POST /webhooks/elevenlabs` - mirror completed call turns into the event log
 
 ---
 
-## Demo narrative
+## Capabilities and Graceful Degradation
 
-1. A patient completes a short video intake and receives an initial predicted ESI.
-2. The patient arrives and is linked to their synthetic chart and camera track.
-3. Vigil establishes a normal visual and vocal baseline.
-4. Their posture, movement, speech, or responsiveness changes while waiting.
-5. Vigil accumulates patient-specific evidence instead of reacting to one frame.
-6. It checks in with the patient when the evidence is ambiguous.
-7. Vigil raises urgency, for example ESI 3 → ESI 2, when warranted.
-8. The charge nurse receives a concise, chart-grounded call.
-9. The dashboard shows the evidence and safety reasoning.
-10. Vigil produces the SOAP note and FHIR incident bundle automatically.
+Every layer is optional. Vigil starts with whatever is configured and says what is missing.
+
+| Layer | Requirement | Behavior when unavailable |
+|---|---|---|
+| Cohort | `data/demo_cohort.json` | Server starts without an active patient |
+| Reasoning | `ANTHROPIC_API_KEY` | Incident stops before clinical re-triage |
+| Vision | Webcam + OpenCV/Ultralytics | Vision thread is disabled |
+| Audio | Microphone + `sounddevice` | Audio thread is disabled |
+| Audio ML | `uv sync --extra audio` | Falls back to a loudness/spectral heuristic |
+| Face identity | `uv sync --extra faces` + enrolled gallery | Uses the manually selected active patient |
+| Nurse call | ElevenLabs or Twilio credentials | Action is recorded as failed / not configured |
+| SOAP note | `ANTHROPIC_API_KEY` | Deterministic chart-grounded fallback |
+| FHIR | No external credentials | Bundle is written locally to `data/incidents/` |
+| Remote feed | Supabase credentials | Local dashboard and event bus keep working |
+
+---
+
+## Tests
+
+Forty-four offline tests cover the deterministic, safety-critical core: multimodal fusion and cooldown behavior, the escalation ladder, the monotonic ESI clamp, fail-safe action correction, initial-triage invariants, the call gate, fall and seizure geometry, and FHIR bundle shape.
+
+```bash
+uv run pytest tests
+```
+
+None of it needs a camera, a microphone, or a live API key - the parts that decide whether a nurse gets called are pure Python.
+
+---
+
+## Safety Rules
+
+- **Clinical decision support, not diagnosis.** Vigil recommends attention; a clinician makes the medical decision.
+- **Monotonic re-triage.** Vigil can add urgency but can never remove it, and the clamp is code, not a prompt.
+- **Fail safe, not silent.** A reasoning API failure escalates and flags for review rather than assigning a low acuity.
+- **Human in the loop.** Ambiguous or serious evidence brings a person in rather than autonomously acting on the patient.
+- **Synthetic data only.** The demo cohort contains no real patient records.
+- **Consent for identity.** Face enrollment is explicit and limited to the monitoring episode; only 512-d embeddings are stored, never images, and nothing is uploaded.
+- **Honest perception limits.** Vigil detects a defined signal catalog plus anomalies. It does not claim to recognize every possible emergency.
+- **Prototype status.** This is not a validated medical device and must not be used for real clinical care.
+
+---
+
+## Abridge Integration
+
+Vigil extends the ambient documentation thesis across the whole incident, not just the visit:
+
+- **Chart in.** Conditions, medications, demographics, and latest vitals from a synthetic FHIR R4 record ground the re-triage decision.
+- **Ambient event in.** The waiting-room episode becomes a clinical event instead of disappearing before the patient reaches the front desk.
+- **Note out.** A SOAP incident note plus the transcript.
+- **FHIR out.** Encounter, ESI Observation, event Observation, SOAP DocumentReference, transcript DocumentReference, safety Flag, and nurse Communication, packaged as one transaction bundle linked to the patient. POST-ready; the demo writes it locally.
+
+---
+
+## Roadmap
+
+- Persistent mapping of multiple camera track IDs to individual patient monitors
+- Simultaneous monitoring of several patients with independent state per track
+- Longer temporal baselines and a broader visual and audio event catalog
+- Natural-language distress understanding ("I can't breathe")
+- Multi-patient dashboard controls
+- Optional submission of the generated bundle to a real FHIR endpoint
+
+The current build is a single-participant demo: a recognized face can replace the active patient automatically, but pose observations are routed to that one active profile.
+
+---
+
+## Hackathon Contribution
+
+Original work here: the fused visual/audio perception pipeline, the chart-grounded monotonic re-triage agent, the severity-aware patient-check-in and nurse-escalation ladder, dynamic chart-grounded ElevenLabs/Twilio calling, ambient SOAP documentation and FHIR incident packaging, the live reasoning dashboard, and the closed-loop tuner for every threshold in the system.
+
+Pre-existing technologies: Ultralytics YOLO, ByteTrack, OpenCV, the AST AudioSet classifier, InsightFace, the Anthropic and ElevenLabs APIs, Twilio, FastAPI, and the provided synthetic FHIR dataset.
+
+Built by [Sahiel Bose](https://github.com/sahielbose) and [Pranav Achar](https://github.com/PranavAchar01).
+
+---
+
+## License
+
+[MIT](LICENSE) - built for the Anthropic x Lightspeed x Abridge Hackathon, *The Future of Agentic AI in Healthcare*.
 
 **Vigil does not replace triage. It keeps triage from becoming stale.**
