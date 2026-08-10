@@ -1,4 +1,4 @@
-# Vigil 🏆 - Finalist (Top 6 of 115), Anthropic x Lightspeed x Abridge Hackathon
+# Vigil 🏆 - Finalist (Top 6 of 115), Anthropic x Abridge x Lightspeed Hackathon
 
 **An always-on, identity-aware re-triage agent for the emergency waiting room.**
 
@@ -328,6 +328,6 @@ Built by [Sahiel Bose](https://github.com/sahielbose) and [Pranav Achar](https:/
 
 ## License
 
-[MIT](LICENSE) - built for the Anthropic x Lightspeed x Abridge Hackathon, *The Future of Agentic AI in Healthcare*.
+[MIT](LICENSE) - built for the Anthropic x Abridge x Lightspeed Hackathon, *The Future of Agentic AI in Healthcare*.
 
 **Vigil does not replace triage. It keeps triage from becoming stale.**
